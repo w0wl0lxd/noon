@@ -76,6 +76,19 @@ struct StashedDraft {
     pastes: Vec<String>,
 }
 
+/// Result of a `stash_toggle` press.
+pub enum StashOutcome {
+    /// Non-empty composer moved into the stash.
+    Stashed,
+    /// Stash contents restored into an empty composer.
+    Restored,
+    /// Nothing in the composer and nothing stashed.
+    NothingToStash,
+    /// Composer non-empty but a stash already exists — refused rather than
+    /// silently overwriting it.
+    Occupied,
+}
+
 /// Inline reverse-history-search state (Ctrl+R). `saved` restores the
 /// pre-search buffer on cancel; `matches` are history indices containing
 /// `query`, oldest to newest; `pos` is the highlighted match.
@@ -116,12 +129,17 @@ impl InputBox {
         self.follow_cursor = true;
 
         if self.history_search.is_some() {
-            if let KeyCode::Char(c) = key.code
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
-            {
-                self.history_search_push(c);
+            if let KeyCode::Char(c) = key.code {
+                // `Char`+Ctrl+Alt is `AltGr` — printable input, not a chord.
+                let altgr = key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.modifiers.contains(KeyModifiers::ALT);
+                if altgr
+                    || !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                {
+                    self.history_search_push(c);
+                }
             }
             return InputAction::None;
         }
@@ -145,6 +163,11 @@ impl InputBox {
     /// `PaletteSync` so the command palette tracks the new text.
     pub fn edit_action(&mut self, action: KeyAction) -> InputAction {
         self.follow_cursor = true;
+        // An editing key during history search accepts the shown match
+        // first, then applies — the readline model.
+        if self.history_search.is_some() {
+            self.history_search_accept();
+        }
         let changed = match action {
             KeyAction::InputUp => {
                 if self.is_at_first_line() {
@@ -228,25 +251,30 @@ impl InputBox {
     }
 
     /// Stash a non-empty draft for later, or restore the stash when the
-    /// composer is empty. `Some(true)` stashed, `Some(false)` restored.
-    pub fn stash_toggle(&mut self) -> Option<bool> {
+    /// composer is empty. An occupied stash is never overwritten — the
+    /// caller flashes a hint instead.
+    pub fn stash_toggle(&mut self) -> StashOutcome {
+        self.history_search_cancel();
         if !self.buffer.value().trim().is_empty() || !self.pending_images.is_empty() {
+            if self.stash.is_some() {
+                return StashOutcome::Occupied;
+            }
             self.stash = Some(StashedDraft {
                 text: self.buffer.value(),
                 images: mem::take(&mut self.pending_images),
                 pastes: mem::take(&mut self.pastes),
             });
             self.discard();
-            return Some(true);
+            return StashOutcome::Stashed;
         }
         if let Some(stashed) = self.stash.take() {
             self.buffer.set_text(&stashed.text);
             self.pending_images = stashed.images;
             self.pastes = stashed.pastes;
             self.buffer.move_to_end();
-            return Some(false);
+            return StashOutcome::Restored;
         }
-        None
+        StashOutcome::NothingToStash
     }
 
     pub fn history_search_active(&self) -> bool {
@@ -300,10 +328,11 @@ impl InputBox {
         self.draft.clear();
     }
 
-    /// Cancel: restore the buffer as it was before the search.
+    /// Cancel: restore the buffer as it was before the search. The restore
+    /// skips undo recording — the search itself is the recovery mechanism.
     pub fn history_search_cancel(&mut self) {
         if let Some(search) = self.history_search.take() {
-            self.buffer.set_text(&search.saved);
+            self.buffer.set_text_silent(&search.saved);
             self.buffer.move_to_end();
         }
     }
@@ -358,13 +387,16 @@ impl InputBox {
         };
         if let Some(entry) = self.history.get(idx) {
             let text = entry.to_string();
-            self.buffer.set_text(&text);
+            self.buffer.set_text_silent(&text);
             self.buffer.move_to_end();
         }
     }
 
     pub fn handle_paste(&mut self, text: &str) -> InputAction {
         self.follow_cursor = true;
+        // Pasting mid-search restores the pre-search draft first, so the
+        // paste lands on real content instead of a shown match.
+        self.history_search_cancel();
         let line_count = text.split('\n').count();
         if line_count >= PASTE_COLLAPSE_LINES {
             self.pastes.push(text.to_string());
@@ -376,18 +408,23 @@ impl InputBox {
         InputAction::PaletteSync(self.buffer.value())
     }
 
+    /// The chip embeds a zero-width space so text typed to *look* like a
+    /// chip can never collide with a real marker on expand.
     fn paste_chip(&self, idx: usize) -> String {
         let line_count = self.pastes[idx].split('\n').count();
-        format!("[Pasted #{} +{line_count} lines]", idx + 1)
+        format!("[Pasted\u{200B}#{} +{line_count} lines]", idx + 1)
     }
 
-    /// Swap paste chips back for their stored content, in place.
+    /// Swap paste chips back for their stored content, in place. Every
+    /// occurrence expands — a duplicated chip pastes its content twice.
     fn expand_pastes(&self, text: &str) -> String {
         let mut expanded = text.to_string();
         for (i, content) in self.pastes.iter().enumerate() {
             let chip = self.paste_chip(i);
-            if let Some(pos) = expanded.find(&chip) {
+            let mut from = 0;
+            while let Some(pos) = expanded[from..].find(&chip).map(|p| from + p) {
                 expanded.replace_range(pos..pos + chip.len(), content);
+                from = pos + content.len();
             }
         }
         expanded
@@ -537,6 +574,7 @@ impl InputBox {
         self.pending_images.clear();
         self.pastes.clear();
         self.history_index = None;
+        self.history_search = None;
         self.draft.clear();
         self.buffer.clear();
         self.scroll_y = 0;
@@ -553,10 +591,12 @@ impl InputBox {
     }
 
     pub fn set_input(&mut self, s: &str) {
+        self.history_search = None;
         self.buffer.set_text(s);
     }
 
     pub fn set_submission(&mut self, sub: Submission) {
+        self.history_search = None;
         self.buffer.set_text(&sub.text);
         self.pending_images = sub.images;
     }
@@ -1473,11 +1513,11 @@ mod tests {
         type_text(&mut input, "draft text");
         input.attach_image(test_image());
 
-        assert_eq!(input.stash_toggle(), Some(true));
+        assert!(matches!(input.stash_toggle(), StashOutcome::Stashed));
         assert!(input.is_empty());
         assert!(input.buffer.value().is_empty());
 
-        assert_eq!(input.stash_toggle(), Some(false));
+        assert!(matches!(input.stash_toggle(), StashOutcome::Restored));
         assert_eq!(input.buffer.value(), "draft text");
         let sub = input.submit().unwrap();
         assert_eq!(sub.images.len(), 1);
@@ -1486,8 +1526,23 @@ mod tests {
     #[test]
     fn stash_toggle_empty_is_noop() {
         let mut input = InputBox::new(InputHistory::default());
-        assert_eq!(input.stash_toggle(), None);
+        assert!(matches!(input.stash_toggle(), StashOutcome::NothingToStash));
         assert!(input.buffer.value().is_empty());
+    }
+
+    #[test]
+    fn stash_occupied_is_refused_not_overwritten() {
+        let mut input = InputBox::new(InputHistory::default());
+        type_text(&mut input, "first");
+        assert!(matches!(input.stash_toggle(), StashOutcome::Stashed));
+
+        type_text(&mut input, "second");
+        assert!(matches!(input.stash_toggle(), StashOutcome::Occupied));
+        assert_eq!(input.buffer.value(), "second");
+
+        input.discard();
+        assert!(matches!(input.stash_toggle(), StashOutcome::Restored));
+        assert_eq!(input.buffer.value(), "first");
     }
 
     #[test]
@@ -1550,7 +1605,7 @@ mod tests {
     fn long_paste_collapses_to_chip_and_expands_on_submit() {
         let mut input = InputBox::new(InputHistory::default());
         input.handle_paste("l1\nl2\nl3\nl4\nl5\nl6");
-        assert_eq!(input.buffer.value(), "[Pasted #1 +6 lines]");
+        assert_eq!(input.buffer.value(), "[Pasted\u{200B}#1 +6 lines]");
 
         let sub = input.submit().unwrap();
         assert_eq!(sub.text, "l1\nl2\nl3\nl4\nl5\nl6");
@@ -1570,7 +1625,10 @@ mod tests {
         input.handle_paste("a\nb\nc\nd\ne\nf");
         type_text(&mut input, " now");
 
-        assert_eq!(input.buffer.value(), "run this [Pasted #1 +6 lines] now");
+        assert_eq!(
+            input.buffer.value(),
+            "run this [Pasted\u{200B}#1 +6 lines] now"
+        );
         let sub = input.submit().unwrap();
         assert_eq!(sub.text, "run this a\nb\nc\nd\ne\nf now");
     }
@@ -1580,11 +1638,95 @@ mod tests {
         let mut input = InputBox::new(InputHistory::default());
         input.handle_paste("x\ny\nz\nw\nv\nu");
 
-        assert_eq!(input.stash_toggle(), Some(true));
-        assert_eq!(input.stash_toggle(), Some(false));
-        assert_eq!(input.buffer.value(), "[Pasted #1 +6 lines]");
+        assert!(matches!(input.stash_toggle(), StashOutcome::Stashed));
+        assert!(matches!(input.stash_toggle(), StashOutcome::Restored));
+        assert_eq!(input.buffer.value(), "[Pasted\u{200B}#1 +6 lines]");
 
         let sub = input.submit().unwrap();
         assert_eq!(sub.text, "x\ny\nz\nw\nv\nu");
+    }
+
+    #[test]
+    fn typed_chip_lookalike_does_not_collide() {
+        let mut input = InputBox::new(InputHistory::default());
+        input.handle_paste("real\npaste\ncontent\nhere\nyes\nok");
+        // A literal that LOOKS like the chip but lacks the ZWSP marker must
+        // pass through untouched while the real chip still expands.
+        type_text(&mut input, " [Pasted #1 +6 lines]");
+        let sub = input.submit().unwrap();
+        assert_eq!(
+            sub.text,
+            "real\npaste\ncontent\nhere\nyes\nok [Pasted #1 +6 lines]"
+        );
+    }
+
+    #[test]
+    fn paste_during_search_restores_draft_then_inserts() {
+        let mut input = InputBox::new(InputHistory::default());
+        submit_text(&mut input, "old cmd");
+        type_text(&mut input, "wip");
+
+        input.start_history_search();
+        assert_eq!(input.buffer.value(), "old cmd");
+        input.handle_paste("a\nb\nc\nd\ne\nf");
+
+        assert!(!input.history_search_active());
+        assert_eq!(input.buffer.value(), "wip[Pasted\u{200B}#1 +6 lines]");
+        let sub = input.submit().unwrap();
+        assert_eq!(sub.text, "wipa\nb\nc\nd\ne\nf");
+    }
+
+    #[test]
+    fn discard_clears_history_search() {
+        let mut input = InputBox::new(InputHistory::default());
+        submit_text(&mut input, "old cmd");
+        type_text(&mut input, "wip");
+        input.start_history_search();
+
+        input.discard();
+        assert!(!input.history_search_active());
+        // Nothing is resurrected: the discard is final.
+        assert_eq!(input.buffer.value(), "");
+    }
+
+    #[test]
+    fn edit_action_during_search_accepts_match_first() {
+        let mut input = InputBox::new(InputHistory::default());
+        submit_text(&mut input, "old cmd");
+        input.start_history_search();
+        assert_eq!(input.buffer.value(), "old cmd");
+
+        // A bound edit key acts on the accepted match, not the query.
+        input.edit_action(crate::keymap::KeyAction::KillLineStart);
+        assert!(!input.history_search_active());
+        assert_eq!(input.buffer.value(), "");
+        let sub = input.submit();
+        assert!(sub.is_none());
+    }
+
+    #[test]
+    fn undo_after_search_cancel_ignores_search_edits() {
+        let mut input = InputBox::new(InputHistory::default());
+        submit_text(&mut input, "old cmd");
+        type_text(&mut input, "wip");
+        input.start_history_search();
+        input.history_search_push('o');
+        input.history_search_cancel();
+        assert_eq!(input.buffer.value(), "wip");
+
+        input.buffer.undo();
+        assert_eq!(input.buffer.value(), "", "undo rewinds typing, not search");
+    }
+
+    #[test]
+    fn altgr_chars_reach_search_query() {
+        let mut input = InputBox::new(InputHistory::default());
+        submit_text(&mut input, "find \\ me");
+        input.start_history_search();
+        input.handle_key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert_eq!(input.history_search_query(), Some("\\"));
     }
 }

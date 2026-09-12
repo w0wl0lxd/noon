@@ -117,6 +117,17 @@ impl TextBuffer {
         self.cursor_y = 0;
     }
 
+    /// Replace the whole buffer without recording an undo step — for
+    /// history-search preview and its cancel-restore, where the search
+    /// itself is the recovery mechanism. Still breaks the edit group and
+    /// cancels a pending yank-pop like a cursor move would.
+    pub fn set_text_silent(&mut self, text: &str) {
+        self.lines = text.split('\n').map(str::to_string).collect();
+        self.raw_x = 0;
+        self.cursor_y = 0;
+        self.note_move();
+    }
+
     pub fn undo(&mut self) -> bool {
         if let Some(snap) = self.undo.pop() {
             self.redo.push(self.snapshot());
@@ -149,7 +160,9 @@ impl TextBuffer {
         self.record(EditKind::Other);
         let (sy, sx) = (self.cursor_y, self.x());
         self.insert_text_inner(&text);
-        let (end_y, end_x) = Self::span_end(sy, sx, &text);
+        // The cursor sits at the insertion end — reading it back keeps the
+        // span correct through `\t` expansion and any future sanitizing.
+        let (end_y, end_x) = (self.cursor_y, self.x());
         self.yank = Some(YankSpan {
             y: sy,
             x: sx,
@@ -176,7 +189,7 @@ impl TextBuffer {
         self.cursor_y = span.y;
         self.raw_x = span.x;
         self.insert_text_inner(&text);
-        let (end_y, end_x) = Self::span_end(span.y, span.x, &text);
+        let (end_y, end_x) = (self.cursor_y, self.x());
         self.yank = Some(YankSpan {
             end_y,
             end_x,
@@ -184,16 +197,6 @@ impl TextBuffer {
             ..span
         });
         true
-    }
-
-    fn span_end(start_y: usize, start_x: usize, text: &str) -> (usize, usize) {
-        let newlines = text.matches('\n').count();
-        if newlines == 0 {
-            (start_y, start_x + text.chars().count())
-        } else {
-            let last = text.rsplit('\n').next().map_or(0, |l| l.chars().count());
-            (start_y + newlines, last)
-        }
     }
 
     fn remove_span(&mut self, sy: usize, sx: usize, ey: usize, ex: usize) {
@@ -287,6 +290,9 @@ impl TextBuffer {
     }
 
     pub fn remove_char(&mut self) {
+        if self.x() == 0 && self.cursor_y == 0 {
+            return;
+        }
         self.record(EditKind::Remove);
         let x = self.x();
         if x == 0 {
@@ -299,6 +305,9 @@ impl TextBuffer {
     }
 
     pub fn delete_char(&mut self) {
+        if self.x() == self.current_line_len() && self.cursor_y + 1 == self.lines.len() {
+            return;
+        }
         self.record(EditKind::Remove);
         let x = self.x();
         if x == self.current_line_len() {
@@ -1065,5 +1074,39 @@ mod tests {
         buf.remove_word_before_cursor();
         assert!(buf.yank());
         assert_eq!(buf.value(), "alpha beta");
+    }
+
+    #[test]
+    fn noop_delete_leaves_no_dead_undo_step() {
+        let mut buf = TextBuffer::new("");
+        buf.remove_char(); // backspace on empty buffer — nothing happens
+        buf.delete_char();
+        buf.push_char('x');
+        assert!(buf.undo());
+        assert_eq!(buf.value(), "");
+        assert!(!buf.undo(), "no-op deletes must not record undo snapshots");
+    }
+
+    #[test]
+    fn yank_pop_spans_tab_expanded_kill() {
+        // `set_text` can land raw tabs in the buffer (history, editor,
+        // steering restore); a kill then stores them raw while yank
+        // inserts the expanded form — the tracked span must follow the
+        // inserted text, not the raw kill text, or the next pop removes
+        // too little and leaves residue.
+        let mut buf = TextBuffer::new("");
+        buf.set_text("a\tb");
+        buf.move_home();
+        buf.kill_to_end_of_line();
+        buf.set_text("x");
+        buf.move_end();
+        buf.kill_to_start_of_line();
+
+        assert!(buf.yank());
+        assert_eq!(buf.value(), "x");
+        assert!(buf.yank_pop());
+        assert_eq!(buf.value(), "a  b");
+        assert!(buf.yank_pop());
+        assert_eq!(buf.value(), "x");
     }
 }

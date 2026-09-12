@@ -109,9 +109,13 @@ pub struct Bind {
 }
 
 impl Bind {
+    /// Match both sides through stroke normalization so shifted chords
+    /// compare identically whether the terminal keeps the SHIFT flag or
+    /// folds it into the codepoint (Kitty `REPORT_ALTERNATE_KEYS`).
     #[must_use]
     pub fn matches(&self, key: KeyEvent) -> bool {
-        key.code == self.code && key.modifiers == self.modifiers
+        use crate::keymap::KeyStroke;
+        KeyStroke::normalize(key) == KeyStroke::normalize_parts(self.code, self.modifiers)
     }
 
     #[cfg(test)]

@@ -1793,6 +1793,105 @@ fn ctrl_r_history_search_end_to_end() {
 }
 
 #[test]
+fn ctrl_c_during_history_search_aborts_search_not_app() {
+    let mut app = test_app();
+    for c in "wip".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(kb::HISTORY_SEARCH.to_key_event()));
+    assert!(app.input_box.history_search_active());
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+    assert!(!app.input_box.history_search_active());
+    assert_eq!(app.input_box.buffer.value(), "wip");
+    assert_eq!(app.exit_request, ExitRequest::None);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelAgent { .. }))
+    );
+}
+
+#[test]
+fn ctrl_c_during_search_while_streaming_keeps_agent() {
+    let mut app = streaming_app_without_queue();
+    app.update(Msg::Key(kb::HISTORY_SEARCH.to_key_event()));
+    assert!(app.input_box.history_search_active());
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+    assert!(!app.input_box.history_search_active());
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelAgent { .. })),
+        "Ctrl+C must abort the search, not the running agent"
+    );
+    assert_eq!(app.status, Status::Streaming);
+}
+
+#[test]
+fn kitty_shifted_codepoint_still_matches_shifted_binds() {
+    // REPORT_ALTERNATE_KEYS folds Shift into the codepoint and clears the
+    // flag: Alt+Shift+G arrives as Char('G')+ALT, Ctrl+Shift+C as
+    // Char('C')+CONTROL. Both must resolve to the shifted binding.
+    let mut app = test_app();
+    app.active_chat().enable_auto_scroll();
+    app.update(Msg::Key(kb::CHAT_SCROLL_TOP.to_key_event()));
+    assert!(!app.chats[0].auto_scroll());
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('G'),
+        KeyModifiers::ALT,
+    )));
+    assert!(
+        app.chats[0].auto_scroll(),
+        "Alt+Shift+G (folded) should jump to bottom"
+    );
+
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('C'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(app.input_box.buffer.value(), "hi");
+    assert_eq!(app.exit_request, ExitRequest::None);
+}
+
+#[test]
+fn super_enter_submits_like_plain_enter() {
+    let mut app = test_app();
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER)));
+    assert_eq!(
+        app.input_box.buffer.value(),
+        "",
+        "Super+Enter should submit"
+    );
+}
+
+#[test]
+fn ctrl_d_arm_resets_when_typing_between_presses() {
+    let mut app = test_app();
+    app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some("Press Ctrl+D again to exit")
+    );
+    // Intervening real input must disarm the double-press window.
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::None,
+        "intervening typing must reset the Ctrl+D exit arm"
+    );
+}
+
+#[test]
 fn ctrl_underscore_undoes_composer_edit() {
     let mut app = test_app();
     for c in "hi".chars() {

@@ -19,20 +19,35 @@ pub struct KeyStroke {
 impl KeyStroke {
     /// Normalize an event for lookup: `BackTab` is `Tab`+Shift, and a
     /// shifted `Char` folds to lowercase so `ctrl+shift+c` matches whether
-    /// the terminal reports `C` or `c`.
+    /// the terminal reports `C` or `c`. Terminals fold Shift into the
+    /// codepoint two ways — keeping the SHIFT flag, or substituting the
+    /// shifted char and clearing the flag (Kitty `REPORT_ALTERNATE_KEYS`
+    /// via crossterm) — so an uppercase char re-derives SHIFT.
     #[must_use]
     pub fn normalize(key: KeyEvent) -> Self {
         let (code, modifiers) = match key.code {
             KeyCode::BackTab => (KeyCode::Tab, key.modifiers | KeyModifiers::SHIFT),
             _ => (key.code, key.modifiers),
         };
-        let code = match code {
-            KeyCode::Char(c) if modifiers.contains(KeyModifiers::SHIFT) => {
-                KeyCode::Char(c.to_ascii_lowercase())
+        Self::normalize_parts(code, modifiers)
+    }
+
+    /// Normalize a raw code+modifiers pair — the same fold `normalize`
+    /// applies to events. Use on stored bindings (e.g. Lua `<C-T>`
+    /// registers `Char('T')+CONTROL`, shift carried in the codepoint) so
+    /// both sides of a comparison share one canonical shape.
+    #[must_use]
+    pub fn normalize_parts(code: KeyCode, modifiers: KeyModifiers) -> Self {
+        match code {
+            KeyCode::Char(c) if c.is_uppercase() => {
+                let lower = c.to_lowercase().next().unwrap_or_else(|| c);
+                Self {
+                    code: KeyCode::Char(lower),
+                    modifiers: modifiers | KeyModifiers::SHIFT,
+                }
             }
-            other => other,
-        };
-        Self { code, modifiers }
+            _ => Self { code, modifiers },
+        }
     }
 }
 
@@ -154,8 +169,6 @@ pub enum KeyAction {
     Redo,
     // Streaming overrides
     CancelAgent,
-    TranscriptLineUp,
-    TranscriptLineDown,
     // Subagent chat
     SubagentBack,
     SubagentEscape,
@@ -204,26 +217,12 @@ macro_rules! bind {
 pub static BINDINGS: &[(KeybindContext, &[KeyBinding])] = &[
     (
         KeybindContext::Streaming,
-        &[
-            bind!(
-                plain!(Esc),
-                KeyAction::CancelAgent,
-                Some(KeyLabel::Single("Esc")),
-                "Interrupt agent"
-            ),
-            bind!(
-                plain!(Up),
-                KeyAction::TranscriptLineUp,
-                Some(KeyLabel::Alt("↑", "↓")),
-                "Scroll transcript"
-            ),
-            bind!(
-                plain!(Down),
-                KeyAction::TranscriptLineDown,
-                None,
-                "Scroll transcript"
-            ),
-        ],
+        &[bind!(
+            plain!(Esc),
+            KeyAction::CancelAgent,
+            Some(KeyLabel::Single("Esc")),
+            "Interrupt agent"
+        )],
     ),
     (
         KeybindContext::SubagentChat,
@@ -702,6 +701,24 @@ pub fn resolve(stack: &[KeybindContext], key: KeyEvent) -> Option<KeyAction> {
             return Some(binding.action);
         }
     }
+    // The binding table can't enumerate every Enter modifier combo, and the
+    // pre-keymap composer treated them all: any of Shift/Ctrl/Alt meant
+    // newline, Enter with anything else (e.g. `Super`) still submitted.
+    if key.code == KeyCode::Enter
+        && stack.contains(&KeybindContext::Editing)
+        && !stack.contains(&KeybindContext::HistorySearch)
+    {
+        return Some(
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                KeyAction::Newline
+            } else {
+                KeyAction::Submit
+            },
+        );
+    }
     None
 }
 
@@ -814,5 +831,69 @@ mod tests {
             ),
         );
         assert_eq!(resolve(&stack, event), Some(KeyAction::CopySelection));
+    }
+
+    #[test]
+    fn shifted_codepoint_without_shift_flag_still_matches() {
+        // Kitty `REPORT_ALTERNATE_KEYS` via crossterm substitutes the
+        // shifted codepoint AND clears the SHIFT flag: Ctrl+Shift+C arrives
+        // as `Char('C')+CONTROL`. Normalization must re-derive SHIFT or
+        // every ctrl-shift / alt-shift binding is dead on those terminals.
+        let stack = [KeybindContext::Editing, KeybindContext::General];
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Char('C'), KeyModifiers::CONTROL)),
+            Some(KeyAction::CopySelection),
+            "ctrl+shift+c with folded shift must not hit ctrl+c quit"
+        );
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Char('G'), KeyModifiers::ALT)),
+            Some(KeyAction::ScrollBottom)
+        );
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Char('P'), KeyModifiers::ALT)),
+            Some(KeyAction::EditorOpenPlan)
+        );
+    }
+
+    #[test]
+    fn enter_modifier_fallback_covers_unenumerated_combos() {
+        let stack = [KeybindContext::Editing, KeybindContext::General];
+        assert_eq!(
+            resolve(
+                &stack,
+                key(
+                    KeyCode::Enter,
+                    KeyModifiers::from_bits_truncate(
+                        KeyModifiers::ALT.bits() | KeyModifiers::SHIFT.bits()
+                    )
+                )
+            ),
+            Some(KeyAction::Newline)
+        );
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Enter, KeyModifiers::SUPER)),
+            Some(KeyAction::Submit)
+        );
+    }
+
+    #[test]
+    fn enter_fallback_stays_out_of_history_search() {
+        let stack = [
+            KeybindContext::HistorySearch,
+            KeybindContext::Editing,
+            KeybindContext::General,
+        ];
+        // Table-bound combos still resolve (Shift+Enter accepts the match
+        // then newlines, via edit_action's accept-first rule)…
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Some(KeyAction::Newline)
+        );
+        // …but the fallback never fires — Super+Enter mid-search can't
+        // submit the shown match by accident.
+        assert_eq!(
+            resolve(&stack, key(KeyCode::Enter, KeyModifiers::SUPER)),
+            None
+        );
     }
 }

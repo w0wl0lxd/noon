@@ -31,7 +31,7 @@ use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
-use crate::components::input::{InputAction, InputBox, Submission};
+use crate::components::input::{InputAction, InputBox, StashOutcome, Submission};
 use crate::components::keybindings::{KeybindContext, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
@@ -1001,6 +1001,9 @@ impl App {
     /// Unbound plain keys (printable input, `@` trigger) reach the composer.
     /// Modified chords that matched no binding are dead by design.
     fn handle_composer_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // Any real keypress breaks pending double-press confirmations.
+        self.last_esc = None;
+        self.last_ctrl_d = None;
         match self.input_box.handle_key(key) {
             InputAction::PaletteSync(val) if self.is_main_chat() => {
                 self.command_palette.sync(&val);
@@ -1015,9 +1018,13 @@ impl App {
 
     fn dispatch_override(&self, key: KeyEvent) -> bool {
         let snap = self.keymap_reader.load();
+        let stroke = keymap::KeyStroke::normalize(key);
         for entry in &snap.entries {
-            if entry.key == key.code
-                && entry.modifiers == key.modifiers
+            // Lua spells shift either as `<C-S-t>` (flag) or `<C-T>`
+            // (uppercase codepoint) — normalize both sides before compare.
+            let want = keymap::KeyStroke::normalize_parts(entry.key, entry.modifiers);
+            if want.code == stroke.code
+                && want.modifiers == stroke.modifiers
                 && let Some(ref handle) = self.lua_event_handle
                 && handle.run_keybind_callback(entry.id)
             {
@@ -1057,6 +1064,10 @@ impl App {
         match action {
             KeyAction::QuitOrCancel => {
                 self.command_palette.close();
+                if self.input_box.history_search_active() {
+                    self.input_box.history_search_cancel();
+                    return vec![];
+                }
                 if self.queue.cancel_editing() {
                     self.input_box.discard();
                     return vec![];
@@ -1144,7 +1155,12 @@ impl App {
                 }
                 vec![]
             }
-            KeyAction::EditorOpenInput => vec![Action::EditInputInEditor],
+            KeyAction::EditorOpenInput => {
+                // The editor seeds from the live buffer — restore the
+                // pre-search draft first so a shown match isn't edited.
+                self.input_box.history_search_cancel();
+                vec![Action::EditInputInEditor]
+            }
             KeyAction::EditorOpenPlan => {
                 if let Some(p) = self.state.plan.path() {
                     vec![Action::OpenEditor(p.to_path_buf())]
@@ -1228,12 +1244,17 @@ impl App {
             }
             KeyAction::StashToggle => {
                 match self.input_box.stash_toggle() {
-                    Some(true) => self.status_bar.flash("Draft stashed".into()),
-                    Some(false) => {
+                    StashOutcome::Stashed => self.status_bar.flash("Draft stashed".into()),
+                    StashOutcome::Restored => {
                         self.command_palette.sync(&self.input_box.buffer.value());
                         self.status_bar.flash("Draft restored".into());
                     }
-                    None => self.status_bar.flash("Nothing to stash".into()),
+                    StashOutcome::NothingToStash => {
+                        self.status_bar.flash("Nothing to stash".into());
+                    }
+                    StashOutcome::Occupied => self
+                        .status_bar
+                        .flash("Stash already occupied — restore it first".into()),
                 }
                 vec![]
             }
@@ -1250,14 +1271,6 @@ impl App {
                 } else {
                     self.handle_subagent_cancel()
                 }
-            }
-            KeyAction::TranscriptLineUp => {
-                self.active_chat().scroll(1);
-                vec![]
-            }
-            KeyAction::TranscriptLineDown => {
-                self.active_chat().scroll(-1);
-                vec![]
             }
             KeyAction::SubagentBack => {
                 self.active_chat = 0;
@@ -1315,7 +1328,9 @@ impl App {
     /// Forward a resolved editing action into the composer and keep the
     /// command palette in sync with buffer changes.
     fn run_edit(&mut self, action: KeyAction) -> Vec<Action> {
-        if let InputAction::PaletteSync(val) = self.input_box.edit_action(action) {
+        if let InputAction::PaletteSync(val) = self.input_box.edit_action(action)
+            && self.is_main_chat()
+        {
             self.command_palette.sync(&val);
         }
         vec![]
