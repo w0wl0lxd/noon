@@ -4487,6 +4487,48 @@ fn override_shadows_quit_builtin() {
 }
 
 #[test]
+fn override_matches_shifted_key_in_both_terminal_shapes() {
+    // Lua spells shift two ways: `<C-T>` stores Char('T')+CONTROL (shift in
+    // the codepoint), `<C-S-t>` stores Char('t')+CONTROL|SHIFT. Kitty
+    // REPORT_ALTERNATE_KEYS also delivers the folded shape, so dispatch
+    // must normalize both sides or shifted Lua binds go dead there.
+    let entry = n00n_lua::KeymapEntry {
+        key: KeyCode::Char('T'),
+        modifiers: KeyModifiers::CONTROL,
+        desc: "plugin shifted override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 7,
+    };
+    let reader = n00n_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, probe) = n00n_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.keymap_reader = reader;
+
+    // Folded shape: shifted codepoint, SHIFT flag cleared.
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('T'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(actions.is_empty());
+    assert!(
+        probe.try_recv().is_some(),
+        "folded <C-T> event must reach the Lua keybind callback"
+    );
+
+    // Flagged shape: lowercase + explicit SHIFT, same binding.
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    assert!(actions.is_empty());
+    assert!(
+        probe.try_recv().is_some(),
+        "flagged Ctrl+Shift+T event must reach the Lua keybind callback"
+    );
+}
+
+#[test]
 fn override_shadows_tab_mode_toggle() {
     let entry = n00n_lua::KeymapEntry {
         key: KeyCode::Tab,
