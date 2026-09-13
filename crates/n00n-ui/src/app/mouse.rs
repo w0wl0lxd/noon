@@ -344,7 +344,7 @@ impl App {
         self.selection_state = None;
     }
 
-    fn copy_text(&mut self, text: &str, success: String) {
+    pub(super) fn copy_text(&mut self, text: &str, success: String) {
         match self.clipboard.copy_text(text) {
             Ok(CopyResult::Noop) => {}
             Ok(CopyResult::Copied) => self.status_bar.flash(success),

@@ -1915,6 +1915,93 @@ fn shift_enter_inserts_newline() {
 }
 
 #[test]
+fn shift_arrows_select_then_typing_replaces() {
+    let mut app = test_app();
+    for c in "hello".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)));
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)));
+    assert_eq!(app.input_box.buffer.selected_text().as_deref(), Some("lo"));
+
+    app.update(Msg::Key(key(KeyCode::Char('X'))));
+    assert_eq!(app.input_box.buffer.value(), "helX");
+    assert!(app.input_box.buffer.selected_text().is_none());
+}
+
+#[test]
+fn ctrl_shift_arrows_select_words() {
+    let mut app = test_app();
+    for c in "foo bar".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Left,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    assert_eq!(app.input_box.buffer.selected_text().as_deref(), Some("bar"));
+}
+
+#[test]
+fn ctrl_shift_a_selects_all_input() {
+    let mut app = test_app();
+    for c in "draft".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    assert_eq!(
+        app.input_box.buffer.selected_text().as_deref(),
+        Some("draft")
+    );
+
+    // Folded codepoint shape (Kitty REPORT_ALTERNATE_KEYS): 'A'+CONTROL.
+    app.input_box.buffer.clear();
+    for c in "xy".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('A'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(app.input_box.buffer.selected_text().as_deref(), Some("xy"));
+}
+
+#[test]
+fn plain_arrow_after_selection_clears_it() {
+    let mut app = test_app();
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)));
+    assert!(app.input_box.buffer.selected_text().is_some());
+    app.update(Msg::Key(key(KeyCode::Right)));
+    assert!(app.input_box.buffer.selected_text().is_none());
+}
+
+#[test]
+fn copy_selection_prefers_composer_selection() {
+    let mut app = test_app();
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    // The composer path copies directly — it must not arm the mouse
+    // scrape-and-copy machinery.
+    assert!(app.selection_state.is_none());
+    assert_eq!(app.input_box.buffer.value(), "hi");
+}
+
+#[test]
 fn compact_command_sets_streaming() {
     let mut app = test_app();
     let actions = app.execute_command(cmd("/compact"));
@@ -2427,6 +2514,26 @@ fn ctrl_c_cancels_queue_edit_and_restores_original_message() {
     assert_eq!(input.images.len(), 1);
     assert_eq!(input.images[0].media_type, ImageMediaType::Png);
     assert_eq!(&*input.images[0].data, "b3JpZ2luYWw=");
+}
+
+#[test]
+fn esc_cancels_queue_edit_and_restores_original_message() {
+    let mut app = app_with_queued_message();
+    app.queue.set_focus_at(0);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(app.queue.editing().is_some());
+    assert_eq!(app.input_box.buffer.value(), "queued");
+    app.status = Status::Idle;
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(app.queue.editing().is_none());
+    assert_eq!(app.queue.text_messages(), ["queued"]);
+    assert!(app.input_box.is_empty());
+    assert!(
+        app.last_esc.is_none(),
+        "cancelling a queue edit must not arm the rewind double-press"
+    );
 }
 
 #[test]
@@ -5064,6 +5171,21 @@ fn ctrl_c_denies_permission_prompt() {
     assert_eq!(app.exit_request, ExitRequest::None);
     assert!(!app.permission_prompt.is_open());
     assert!(actions.is_empty());
+}
+
+#[test]
+fn esc_denies_permission_prompt() {
+    let mut app = test_app();
+    app.permission_prompt.open(
+        n00n_config::ToolKey::native("bash"),
+        vec!["execute".into()],
+        None,
+    );
+    assert!(app.permission_prompt.is_open());
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.permission_prompt.is_open());
+    assert_eq!(app.exit_request, ExitRequest::None);
 }
 
 const TEST_AREA: Rect = Rect {

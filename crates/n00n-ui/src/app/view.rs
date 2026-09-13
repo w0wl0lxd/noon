@@ -469,6 +469,8 @@ impl App {
             contexts.push(KeybindContext::Search);
         } else if self.file_picker.is_open() {
             contexts.push(KeybindContext::FilePicker);
+        } else if self.mcp_picker.is_open() {
+            contexts.push(KeybindContext::McpPicker);
         } else {
             if self.status == Status::Streaming {
                 contexts.push(KeybindContext::Streaming);

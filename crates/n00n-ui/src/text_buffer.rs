@@ -40,6 +40,9 @@ pub struct TextBuffer {
     lines: Vec<String>,
     raw_x: usize,
     cursor_y: usize,
+    /// Selection anchor `(y, x)` in char coords; the cursor is the other
+    /// end. `None` when nothing is selected.
+    selection: Option<(usize, usize)>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     last_edit: Option<EditKind>,
@@ -54,6 +57,7 @@ impl TextBuffer {
             lines,
             raw_x: 0,
             cursor_y: 0,
+            selection: None,
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
@@ -74,6 +78,7 @@ impl TextBuffer {
         self.lines = snap.lines;
         self.raw_x = snap.raw_x;
         self.cursor_y = snap.cursor_y;
+        self.selection = None;
     }
 
     /// Push the pre-edit state onto the undo stack. Consecutive edits of the
@@ -115,6 +120,7 @@ impl TextBuffer {
         self.lines = text.split('\n').map(str::to_string).collect();
         self.raw_x = 0;
         self.cursor_y = 0;
+        self.selection = None;
     }
 
     /// Replace the whole buffer without recording an undo step — for
@@ -125,6 +131,7 @@ impl TextBuffer {
         self.lines = text.split('\n').map(str::to_string).collect();
         self.raw_x = 0;
         self.cursor_y = 0;
+        self.selection = None;
         self.note_move();
     }
 
@@ -158,6 +165,7 @@ impl TextBuffer {
             return false;
         };
         self.record(EditKind::Other);
+        self.delete_selection();
         let (sy, sx) = (self.cursor_y, self.x());
         self.insert_text_inner(&text);
         // The cursor sits at the insertion end — reading it back keeps the
@@ -210,6 +218,79 @@ impl TextBuffer {
         self.raw_x = sx;
     }
 
+    /// Active selection as `((y, x), (y, x))` char coords, normalized
+    /// start-first. `None` when the anchor equals the cursor — a collapsed
+    /// selection is no selection.
+    pub fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let anchor = self.selection?;
+        let cursor = (self.cursor_y, self.x());
+        if anchor == cursor {
+            return None;
+        }
+        Some(if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        })
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
+    }
+
+    /// The selected text, lines joined by `\n`.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((sy, sx), (ey, ex)) = self.selection()?;
+        if sy == ey {
+            let line = &self.lines[sy];
+            let start = Self::char_to_byte(line, sx);
+            let end = Self::char_to_byte(line, ex);
+            return Some(line[start..end].to_string());
+        }
+        let mut out = self.lines[sy][Self::char_to_byte(&self.lines[sy], sx)..].to_string();
+        for line in &self.lines[sy + 1..ey] {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out.push('\n');
+        out.push_str(&self.lines[ey][..Self::char_to_byte(&self.lines[ey], ex)]);
+        Some(out)
+    }
+
+    /// Anchor at buffer start, cursor at buffer end.
+    pub fn select_all(&mut self) {
+        self.note_move();
+        self.selection = Some((0, 0));
+        self.cursor_y = self.lines.len().saturating_sub(1);
+        self.raw_x = self.current_line_len();
+    }
+
+    /// Remove the selected range, leaving the cursor at its start. Records
+    /// no undo step — callers `record` first so a delete+insert pair
+    /// (typing over a selection) stays one undoable edit.
+    fn delete_selection(&mut self) -> bool {
+        let Some(((sy, sx), (ey, ex))) = self.selection() else {
+            return false;
+        };
+        self.remove_span(sy, sx, ey, ex);
+        self.selection = None;
+        true
+    }
+
+    /// Kill keys (word kills, line kills) over a selection kill the
+    /// selection itself — one `Other` undo step plus a kill-ring push.
+    /// Plain delete keys take the unrecorded-by-kind path instead and
+    /// never touch the ring.
+    fn kill_selection(&mut self) -> bool {
+        let Some(text) = self.selected_text() else {
+            return false;
+        };
+        self.record(EditKind::Other);
+        self.delete_selection();
+        self.push_kill(text);
+        true
+    }
+
     pub fn value(&self) -> String {
         self.lines.join("\n")
     }
@@ -250,6 +331,7 @@ impl TextBuffer {
 
     pub fn push_char(&mut self, c: char) {
         self.record(EditKind::Insert);
+        self.delete_selection();
         let bx = self.byte_x();
         self.lines[self.cursor_y].insert(bx, c);
         self.raw_x = self.x() + 1;
@@ -257,6 +339,7 @@ impl TextBuffer {
 
     pub fn insert_text(&mut self, text: &str) {
         self.record(EditKind::Insert);
+        self.delete_selection();
         self.insert_text_inner(text);
     }
 
@@ -276,6 +359,7 @@ impl TextBuffer {
 
     pub fn add_line(&mut self) {
         self.record(EditKind::Other);
+        self.delete_selection();
         self.add_line_inner();
     }
 
@@ -290,6 +374,11 @@ impl TextBuffer {
     }
 
     pub fn remove_char(&mut self) {
+        if self.has_selection() {
+            self.record(EditKind::Remove);
+            self.delete_selection();
+            return;
+        }
         if self.x() == 0 && self.cursor_y == 0 {
             return;
         }
@@ -305,6 +394,11 @@ impl TextBuffer {
     }
 
     pub fn delete_char(&mut self) {
+        if self.has_selection() {
+            self.record(EditKind::Remove);
+            self.delete_selection();
+            return;
+        }
         if self.x() == self.current_line_len() && self.cursor_y + 1 == self.lines.len() {
             return;
         }
@@ -364,7 +458,11 @@ impl TextBuffer {
     }
 
     /// Delete the word after the cursor, saving it to the kill ring.
+    /// With an active selection the word keys kill the selection instead.
     pub fn delete_word_after_cursor(&mut self) {
+        if self.kill_selection() {
+            return;
+        }
         let x = self.x();
         let line_len = self.current_line_len();
         if x == line_len {
@@ -385,7 +483,11 @@ impl TextBuffer {
     }
 
     /// Delete to the end of the line, saving the killed text to the ring.
+    /// With an active selection the kill keys kill the selection instead.
     pub fn kill_to_end_of_line(&mut self) {
+        if self.kill_selection() {
+            return;
+        }
         let bx = self.byte_x();
         if bx == self.lines[self.cursor_y].len() {
             return;
@@ -397,7 +499,11 @@ impl TextBuffer {
     }
 
     /// Delete the word before the cursor, saving it to the kill ring.
+    /// With an active selection the word keys kill the selection instead.
     pub fn remove_word_before_cursor(&mut self) {
+        if self.kill_selection() {
+            return;
+        }
         let x = self.x();
         if x == 0 {
             if self.cursor_y == 0 {
@@ -419,8 +525,22 @@ impl TextBuffer {
         self.push_kill(killed);
     }
 
-    pub fn move_word_left(&mut self) {
+    /// Shared cursor-motion driver: `selecting` keeps (or anchors at the
+    /// pre-move position) the selection, plain motion drops it. Either way
+    /// motion breaks the undo group like before.
+    fn move_cursor(&mut self, selecting: bool, step: impl FnOnce(&mut Self)) {
+        if selecting {
+            if self.selection.is_none() {
+                self.selection = Some((self.cursor_y, self.x()));
+            }
+        } else {
+            self.selection = None;
+        }
         self.note_move();
+        step(self);
+    }
+
+    fn step_word_left(&mut self) {
         let x = self.x();
         if x == 0 {
             self.wrap_to_prev_line();
@@ -429,8 +549,7 @@ impl TextBuffer {
         self.raw_x = self.find_prev_word_boundary(x);
     }
 
-    pub fn move_word_right(&mut self) {
-        self.note_move();
+    fn step_word_right(&mut self) {
         let x = self.x();
         if x == self.current_line_len() {
             self.wrap_to_next_line();
@@ -439,8 +558,7 @@ impl TextBuffer {
         self.raw_x = self.find_next_word_boundary(x);
     }
 
-    pub fn move_left(&mut self) {
-        self.note_move();
+    fn step_left(&mut self) {
         let x = self.x();
         if x > 0 {
             self.raw_x = x - 1;
@@ -449,8 +567,7 @@ impl TextBuffer {
         }
     }
 
-    pub fn move_right(&mut self) {
-        self.note_move();
+    fn step_right(&mut self) {
         let x = self.x();
         if x < self.current_line_len() {
             self.raw_x = x + 1;
@@ -459,28 +576,90 @@ impl TextBuffer {
         }
     }
 
-    pub fn move_up(&mut self) {
-        self.note_move();
+    fn step_up(&mut self) {
         if self.cursor_y > 0 {
             self.cursor_y -= 1;
         }
     }
 
-    pub fn move_down(&mut self) {
-        self.note_move();
+    fn step_down(&mut self) {
         if self.cursor_y < self.lines.len().saturating_sub(1) {
             self.cursor_y += 1;
         }
     }
 
-    pub fn move_home(&mut self) {
-        self.note_move();
+    fn step_home(&mut self) {
         self.raw_x = 0;
     }
 
-    pub fn move_end(&mut self) {
-        self.note_move();
+    fn step_end(&mut self) {
         self.raw_x = self.current_line_len();
+    }
+
+    pub fn move_word_left(&mut self) {
+        self.move_cursor(false, Self::step_word_left);
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.move_cursor(false, Self::step_word_right);
+    }
+
+    pub fn move_left(&mut self) {
+        self.move_cursor(false, Self::step_left);
+    }
+
+    pub fn move_right(&mut self) {
+        self.move_cursor(false, Self::step_right);
+    }
+
+    pub fn move_up(&mut self) {
+        self.move_cursor(false, Self::step_up);
+    }
+
+    pub fn move_down(&mut self) {
+        self.move_cursor(false, Self::step_down);
+    }
+
+    pub fn move_home(&mut self) {
+        self.move_cursor(false, Self::step_home);
+    }
+
+    pub fn move_end(&mut self) {
+        self.move_cursor(false, Self::step_end);
+    }
+
+    /// Shift-motion variants: extend the selection from its anchor (or the
+    /// cursor position when no selection exists yet) to the moved cursor.
+    pub fn select_word_left(&mut self) {
+        self.move_cursor(true, Self::step_word_left);
+    }
+
+    pub fn select_word_right(&mut self) {
+        self.move_cursor(true, Self::step_word_right);
+    }
+
+    pub fn select_left(&mut self) {
+        self.move_cursor(true, Self::step_left);
+    }
+
+    pub fn select_right(&mut self) {
+        self.move_cursor(true, Self::step_right);
+    }
+
+    pub fn select_up(&mut self) {
+        self.move_cursor(true, Self::step_up);
+    }
+
+    pub fn select_down(&mut self) {
+        self.move_cursor(true, Self::step_down);
+    }
+
+    pub fn select_home(&mut self) {
+        self.move_cursor(true, Self::step_home);
+    }
+
+    pub fn select_end(&mut self) {
+        self.move_cursor(true, Self::step_end);
     }
 
     /// Reset the buffer and its edit history (submit/discard starts a new
@@ -489,6 +668,7 @@ impl TextBuffer {
         self.lines = vec![String::new()];
         self.raw_x = 0;
         self.cursor_y = 0;
+        self.selection = None;
         self.undo.clear();
         self.redo.clear();
         self.last_edit = None;
@@ -496,6 +676,7 @@ impl TextBuffer {
     }
 
     pub fn move_to_end(&mut self) {
+        self.selection = None;
         self.note_move();
         self.cursor_y = self.lines.len().saturating_sub(1);
         self.raw_x = self.current_line_len();
@@ -518,7 +699,11 @@ impl TextBuffer {
     }
 
     /// Delete to the start of the line, saving the killed text to the ring.
+    /// With an active selection the kill keys kill the selection instead.
     pub fn kill_to_start_of_line(&mut self) {
+        if self.kill_selection() {
+            return;
+        }
         let byte_x = Self::char_to_byte(&self.lines[self.cursor_y], self.x());
         if byte_x == 0 {
             return;
@@ -1108,5 +1293,123 @@ mod tests {
         assert_eq!(buf.value(), "a  b");
         assert!(buf.yank_pop());
         assert_eq!(buf.value(), "x");
+    }
+
+    #[test]
+    fn shift_motion_extends_and_shrinks_selection() {
+        let mut buf = TextBuffer::new("hello");
+        buf.move_home();
+        buf.select_right();
+        buf.select_right();
+        assert_eq!(buf.selected_text().as_deref(), Some("he"));
+        // Reversing direction contracts the same selection.
+        buf.select_left();
+        assert_eq!(buf.selected_text().as_deref(), Some("h"));
+        // Collapsing back onto the anchor is no selection at all.
+        buf.select_left();
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn selection_spans_lines_and_words() {
+        let mut buf = TextBuffer::new("ab\ncd\nef");
+        buf.move_home();
+        buf.select_end();
+        assert_eq!(buf.selected_text().as_deref(), Some("ab"));
+        buf.select_down();
+        assert_eq!(buf.selected_text().as_deref(), Some("ab\ncd"));
+
+        let mut buf = TextBuffer::new("one two three");
+        buf.move_home();
+        buf.select_word_right();
+        assert_eq!(buf.selected_text().as_deref(), Some("one"));
+        buf.select_word_right();
+        assert_eq!(buf.selected_text().as_deref(), Some("one two"));
+    }
+
+    #[test]
+    fn plain_motion_clears_selection() {
+        let mut buf = TextBuffer::new("hello");
+        buf.move_home();
+        buf.select_right();
+        buf.select_right();
+        assert!(buf.has_selection());
+        buf.move_right();
+        assert!(!buf.has_selection());
+    }
+
+    #[test]
+    fn typing_replaces_selection_as_one_undo_step() {
+        let mut buf = TextBuffer::new("hello world");
+        buf.move_home();
+        buf.select_word_right();
+        buf.push_char('X');
+        assert_eq!(buf.value(), "X world");
+        assert_eq!((buf.y(), buf.x()), (0, 1));
+        assert!(!buf.has_selection());
+
+        assert!(buf.undo());
+        assert_eq!(buf.value(), "hello world");
+        assert!(!buf.has_selection());
+        assert!(buf.redo());
+        assert_eq!(buf.value(), "X world");
+    }
+
+    #[test]
+    fn delete_keys_remove_selection_without_kill_ring() {
+        let mut buf = TextBuffer::new("hello world");
+        buf.move_home();
+        buf.select_word_right();
+        buf.remove_char();
+        assert_eq!(buf.value(), " world");
+        assert!(!buf.yank(), "backspace must not feed the kill ring");
+
+        let mut buf = TextBuffer::new("hello world");
+        buf.select_all();
+        buf.delete_char();
+        assert_eq!(buf.value(), "");
+        assert!(!buf.yank(), "delete must not feed the kill ring");
+    }
+
+    #[test]
+    fn kill_keys_over_selection_feed_kill_ring() {
+        let mut buf = TextBuffer::new("hello world");
+        buf.move_home();
+        buf.select_word_right();
+        buf.remove_word_before_cursor();
+        assert_eq!(buf.value(), " world");
+        assert!(buf.yank());
+        assert_eq!(buf.value(), "hello world");
+
+        let mut buf = TextBuffer::new("ab\ncd");
+        buf.select_all();
+        buf.kill_to_start_of_line();
+        assert_eq!(buf.value(), "");
+        assert!(buf.yank());
+        assert_eq!(buf.value(), "ab\ncd");
+    }
+
+    #[test]
+    fn select_all_covers_whole_buffer() {
+        let mut buf = TextBuffer::new("ab\ncd");
+        buf.select_all();
+        assert_eq!(buf.selected_text().as_deref(), Some("ab\ncd"));
+        buf.push_char('x');
+        assert_eq!(buf.value(), "x");
+    }
+
+    #[test]
+    fn selection_undo_restores_exact_pre_edit_state() {
+        let mut buf = TextBuffer::new("keep this");
+        buf.move_to_end();
+        buf.select_home();
+        buf.kill_to_end_of_line();
+        assert_eq!(buf.value(), "");
+        assert!(buf.undo());
+        assert_eq!(buf.value(), "keep this");
+        // The snapshot predates the kill but post-dates the selection move:
+        // the cursor sits where the kill recorded it.
+        assert_eq!((buf.y(), buf.x()), (0, 0));
+        assert!(!buf.has_selection());
     }
 }

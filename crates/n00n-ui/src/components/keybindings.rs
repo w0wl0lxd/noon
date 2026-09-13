@@ -144,16 +144,6 @@ pub mod key {
     pub const SCROLL_LINE_DOWN: Bind = ctrl_bind!('e');
     pub const SCROLL_TOP: Bind = ctrl_bind!('g');
     pub const SCROLL_BOTTOM: Bind = ctrl_bind!('b');
-    pub const CHAT_SCROLL_HALF_UP: Bind = Bind {
-        code: KeyCode::Char('u'),
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+U",
-    };
-    pub const CHAT_SCROLL_HALF_DOWN: Bind = Bind {
-        code: KeyCode::Char('d'),
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+D",
-    };
     pub const CHAT_SCROLL_TOP: Bind = Bind {
         code: KeyCode::Char('g'),
         modifiers: KeyModifiers::ALT,
@@ -182,31 +172,12 @@ pub mod key {
         modifiers: KeyModifiers::ALT,
         label: "Alt+P",
     };
-    pub const TRANSCRIPT_DETAILS: Bind = ctrl_bind!('o');
     pub const TASKS: Bind = ctrl_bind!('t');
     pub const REFRESH: Bind = ctrl_bind!('r');
     pub const HISTORY_SEARCH: Bind = ctrl_bind!('r');
-    pub const REDRAW: Bind = ctrl_bind!('l');
     pub const SUSPEND: Bind = ctrl_bind!('z');
     pub const DELETE: Bind = ctrl_bind!('d');
-    pub const KILL_LINE: Bind = ctrl_bind!('k');
-    pub const LINE_START: Bind = ctrl_bind!('a');
-    pub const LINE_END: Bind = ctrl_bind!('e');
     pub const EDIT_INPUT: Bind = ctrl_bind!('g');
-    pub const COPY: Bind = Bind {
-        code: KeyCode::Char('c'),
-        modifiers: KeyModifiers::from_bits_truncate(
-            KeyModifiers::CONTROL.bits() | KeyModifiers::SHIFT.bits(),
-        ),
-        label: "Ctrl+Shift+C",
-    };
-    pub const THINKING: Bind = Bind {
-        code: KeyCode::Char('t'),
-        modifiers: KeyModifiers::from_bits_truncate(
-            KeyModifiers::CONTROL.bits() | KeyModifiers::SHIFT.bits(),
-        ),
-        label: "Ctrl+Shift+T",
-    };
     pub const THINKING_ALT: Bind = Bind {
         code: KeyCode::Char('t'),
         modifiers: KeyModifiers::ALT,
@@ -231,6 +202,7 @@ pub enum KeybindContext {
     CommandPalette,
     Search,
     FilePicker,
+    McpPicker,
 }
 
 impl KeybindContext {
@@ -252,6 +224,7 @@ impl KeybindContext {
             Self::CommandPalette => "Commands",
             Self::Search => "Search",
             Self::FilePicker => "File Picker",
+            Self::McpPicker => "MCP Picker",
         }
     }
 
@@ -265,7 +238,8 @@ impl KeybindContext {
             | Self::QueueFocus
             | Self::CommandPalette
             | Self::Search
-            | Self::FilePicker => Some(Self::Picker),
+            | Self::FilePicker
+            | Self::McpPicker => Some(Self::Picker),
             Self::SubagentChat | Self::HistorySearch => Some(Self::Editing),
             _ => None,
         }
@@ -449,6 +423,12 @@ const MODAL_KEYBINDS: &[Keybind] = &[
         label: KeyLabel::Single("Tab"),
         description: "Complete command",
         context: KeybindContext::CommandPalette,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("Enter"),
+        description: "Toggle server",
+        context: KeybindContext::McpPicker,
         platform: Platform::All,
     },
     Keybind {

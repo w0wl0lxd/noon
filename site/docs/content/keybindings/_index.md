@@ -48,6 +48,11 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+Del` / `Alt+D` | Delete word forward |
 | `Ctrl+←` / `Ctrl+→` | Move word left / right |
 | `Alt+←` / `Alt+→` | Move word left / right |
+| `Shift+←` / `Shift+→` | Select char left / right |
+| `Shift+↑` / `Shift+↓` | Select line up / down |
+| `Shift+Home` / `Shift+End` | Select to line start / end |
+| `Ctrl+Shift+←` / `Ctrl+Shift+→` | Select word left / right |
+| `Ctrl+Shift+A` | Select all input |
 | `Ctrl+K` | Delete to end of line |
 | `Ctrl+U` | Delete to start of line |
 | `Ctrl+Y` | Paste deleted text |
@@ -99,6 +104,7 @@ Some pickers add extra bindings on top of the defaults:
 | History Search | `↓` | Newer match |
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |
+| MCP Picker | `Enter` | Toggle server |
 | Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
 | Model Picker | `Alt+T` | Cycle thinking level |
 | Session Picker | `Ctrl+N` | New session |
@@ -110,7 +116,7 @@ Some pickers add extra bindings on top of the defaults:
 Child contexts inherit their parent's bindings and add their own.
 
 - **Editing** is the base for: Subagent Chat, History Search
-- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
+- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker, MCP Picker
 
 ## Overriding Keybindings
 

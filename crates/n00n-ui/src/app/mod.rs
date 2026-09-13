@@ -1086,6 +1086,8 @@ impl App {
                 vec![]
             }
             KeyAction::Redraw => vec![Action::Redraw],
+            // Dead arm: `key::SUSPEND` short-circuits in `handle_key` before
+            // keymap resolution; the BINDINGS row only supplies the help label.
             KeyAction::Suspend => vec![Action::Suspend],
             KeyAction::ChatPrev => {
                 self.active_chat = self.active_chat.saturating_sub(1);
@@ -1170,7 +1172,10 @@ impl App {
                 }
             }
             KeyAction::CopySelection => {
-                if let Some(SelectionState::Dragging { sel, .. }) = self.selection_state.take()
+                if let Some(text) = self.input_box.selected_text() {
+                    self.copy_text(&text, "Copied selection".into());
+                } else if let Some(SelectionState::Dragging { sel, .. }) =
+                    self.selection_state.take()
                     && !sel.is_empty()
                 {
                     self.selection_state = Some(SelectionState::PendingCopy { sel });
@@ -1217,6 +1222,10 @@ impl App {
             }
             KeyAction::Escape => {
                 if self.try_restore_pending_submission() {
+                    return vec![];
+                }
+                if self.queue.cancel_editing() {
+                    self.input_box.discard();
                     return vec![];
                 }
                 if let Some(t) = self.last_esc.take()
@@ -1311,6 +1320,15 @@ impl App {
             | KeyAction::WordRight
             | KeyAction::LineStart
             | KeyAction::LineEnd
+            | KeyAction::SelectCharLeft
+            | KeyAction::SelectCharRight
+            | KeyAction::SelectWordLeft
+            | KeyAction::SelectWordRight
+            | KeyAction::SelectLineStart
+            | KeyAction::SelectLineEnd
+            | KeyAction::SelectUp
+            | KeyAction::SelectDown
+            | KeyAction::SelectAll
             | KeyAction::DeleteCharBack
             | KeyAction::DeleteCharForward
             | KeyAction::DeleteWordBack
