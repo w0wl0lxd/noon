@@ -25,6 +25,7 @@ const HINT_DENY_ROW: &[(&str, &str)] = &[
     ("n", "Deny"),
     ("d", "Deny-always (project)"),
     ("D", "Deny-always (all)"),
+    ("Esc", "Deny"),
 ];
 
 const CONFIRM_ALLOW_PROJECT_HINTS: &[(&str, &str)] = &[
@@ -223,6 +224,7 @@ impl PermissionPrompt {
                 *state = PromptState::ConfirmAllowSession;
                 None
             }
+            KeyCode::Esc => Some(PermissionAnswer::Deny),
             _ => None,
         }
     }
@@ -384,6 +386,27 @@ mod tests {
         prompt2.handle_key(key(KeyCode::Char('n')));
         prompt2.handle_key(key(KeyCode::Char('t')));
         assert_eq!(prompt2.handle_key(ctrl_c()), Some(PermissionAnswer::Deny));
+    }
+
+    #[test]
+    fn esc_denies_in_normal_state() {
+        let mut prompt = open_prompt();
+        assert_eq!(
+            prompt.handle_key(key(KeyCode::Esc)),
+            Some(PermissionAnswer::Deny)
+        );
+    }
+
+    #[test]
+    fn esc_in_confirm_state_backs_out_not_denies() {
+        let mut prompt = open_prompt();
+        prompt.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(prompt.handle_key(key(KeyCode::Esc)), None);
+        if let PermissionPrompt::Open { state, .. } = &prompt {
+            assert_eq!(*state, PromptState::Normal);
+        } else {
+            panic!("expected Open");
+        }
     }
 
     #[test]

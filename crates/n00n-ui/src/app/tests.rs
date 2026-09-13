@@ -2430,6 +2430,26 @@ fn ctrl_c_cancels_queue_edit_and_restores_original_message() {
 }
 
 #[test]
+fn esc_cancels_queue_edit_and_restores_original_message() {
+    let mut app = app_with_queued_message();
+    app.queue.set_focus_at(0);
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(app.queue.editing().is_some());
+    assert_eq!(app.input_box.buffer.value(), "queued");
+    app.status = Status::Idle;
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(app.queue.editing().is_none());
+    assert_eq!(app.queue.text_messages(), ["queued"]);
+    assert!(app.input_box.is_empty());
+    assert!(
+        app.last_esc.is_none(),
+        "cancelling a queue edit must not arm the rewind double-press"
+    );
+}
+
+#[test]
 fn queue_delete_removes_selected_visible_item() {
     let mut app = app_with_queued_message();
     app.queue_and_notify(queued_msg("second"));
@@ -5064,6 +5084,21 @@ fn ctrl_c_denies_permission_prompt() {
     assert_eq!(app.exit_request, ExitRequest::None);
     assert!(!app.permission_prompt.is_open());
     assert!(actions.is_empty());
+}
+
+#[test]
+fn esc_denies_permission_prompt() {
+    let mut app = test_app();
+    app.permission_prompt.open(
+        n00n_config::ToolKey::native("bash"),
+        vec!["execute".into()],
+        None,
+    );
+    assert!(app.permission_prompt.is_open());
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.permission_prompt.is_open());
+    assert_eq!(app.exit_request, ExitRequest::None);
 }
 
 const TEST_AREA: Rect = Rect {

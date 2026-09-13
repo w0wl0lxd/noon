@@ -99,6 +99,7 @@ Some pickers add extra bindings on top of the defaults:
 | History Search | `↓` | Newer match |
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |
+| MCP Picker | `Enter` | Toggle server |
 | Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
 | Model Picker | `Alt+T` | Cycle thinking level |
 | Session Picker | `Ctrl+N` | New session |
@@ -110,7 +111,7 @@ Some pickers add extra bindings on top of the defaults:
 Child contexts inherit their parent's bindings and add their own.
 
 - **Editing** is the base for: Subagent Chat, History Search
-- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
+- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker, MCP Picker
 
 ## Overriding Keybindings
 
