@@ -63,7 +63,7 @@ pub enum ModelPickerAction {
     Select(String),
     AssignTier(String, ModelTier),
     UnassignTier(String, ModelTier),
-    CycleThinking,
+    CycleThinking(String),
     Close,
 }
 
@@ -207,7 +207,11 @@ impl ModelPicker {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
         if THINKING_ALT.matches(key) {
-            return ModelPickerAction::CycleThinking;
+            let Some(entry) = self.picker.selected_item() else {
+                return ModelPickerAction::Consumed;
+            };
+            self.dirty = true;
+            return ModelPickerAction::CycleThinking(entry.spec.clone());
         }
         if let Some(tier) = tier_for_shortcut(key)
             && let Some(entry) = self.picker.selected_item()
@@ -399,7 +403,7 @@ mod tests {
         let mut p = ModelPicker::new(test_models());
         p.open("");
         let action = p.handle_key(kb::THINKING_ALT.to_key_event());
-        assert!(matches!(action, ModelPickerAction::CycleThinking));
+        assert!(matches!(action, ModelPickerAction::CycleThinking(_)));
         assert!(p.is_open());
     }
 

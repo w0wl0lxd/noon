@@ -83,6 +83,17 @@ case("oversized_content_is_ellipsis_truncated_not_dropped", function()
   assert(out:find("...", 1, true), "truncated entry must carry ellipsis")
 end)
 
+case("multibyte_content_shrinks_to_valid_json", function()
+  local big = string.rep("é", CAP)
+  local out = TodoPrompt.build({ todo("in_progress", big) })
+  assert(type(out) == "string")
+  assert(#out <= CAP, "block must be within cap, got " .. #out)
+  local line = out:match('\n({"status"[^\n]*)')
+  assert(line, "a shrunk todo line must remain")
+  local decoded = n00n.json.decode(line)
+  assert(type(decoded) == "table" and decoded.status == "in_progress", "shrunk line must stay decodable JSON")
+end)
+
 case("completed_dropped_when_over_cap_but_pending_first", function()
   local filler = string.rep("c", CAP)
   local out = TodoPrompt.build({

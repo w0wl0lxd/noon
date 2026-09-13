@@ -136,6 +136,21 @@ impl PluginStateStore {
         })
     }
 
+    /// Acquire the lock through a poison: a panic while a previous caller held
+    /// the guard cannot corrupt `StateInner` (each `HashMap`/`HashSet` op is
+    /// panic-atomic per collection), so reads and clears may proceed. Clearing
+    /// the poison flag here restores the store for subsequent strict writes.
+    fn lock_recover(&self) -> MutexGuard<'_, StateInner> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("plugin state lock poisoned; recovering");
+                self.inner.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
     #[must_use]
     pub(crate) fn get(
         &self,
@@ -143,14 +158,7 @@ impl PluginStateStore {
         scope: PluginStateScope,
         identity: &PluginStateIdentity,
     ) -> Option<Value> {
-        let guard = match self.lock() {
-            Ok(guard) => guard,
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to acquire plugin state lock for get");
-                return None;
-            }
-        };
-        guard
+        self.lock_recover()
             .values
             .get(&StateKey::new(plugin, scope, identity))
             .cloned()
@@ -237,18 +245,12 @@ impl PluginStateStore {
     }
 
     pub(crate) fn reset(&self, identity: &PluginStateIdentity) {
-        let Ok(mut guard) = self.lock() else {
-            tracing::warn!("failed to acquire plugin state lock for reset");
-            return;
-        };
+        let mut guard = self.lock_recover();
         clear_identity_runtime(&mut guard, identity, true);
     }
 
     pub(crate) fn drop_owner(&self, owner: n00nId) {
-        let Ok(mut inner) = self.lock() else {
-            tracing::warn!("failed to acquire plugin state lock for drop_owner");
-            return;
-        };
+        let mut inner = self.lock_recover();
         inner.values.retain(|key, _| key.owner != owner);
         inner.managed.retain(|key| key.owner != owner);
         inner.bases.retain(|identity, _| {

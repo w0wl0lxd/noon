@@ -4509,6 +4509,7 @@ fn bash_prefix_overrides_mode() {
 #[test]
 fn thinking_toggle_cycles_off_adaptive() {
     let mut app = test_app();
+    app.state.model.id = "thinking-toggle-model".into();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
     app.execute_command(cmd("/thinking"));
@@ -4521,6 +4522,7 @@ fn thinking_toggle_cycles_off_adaptive() {
 #[test]
 fn thinking_explicit_args() {
     let mut app = test_app();
+    app.state.model.id = "thinking-args-model".into();
 
     app.execute_command(ParsedCommand {
         name: "/thinking".into(),
@@ -4552,6 +4554,7 @@ fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Action> {
 #[test]
 fn alt_t_cycles_thinking() {
     let mut app = test_app();
+    app.state.model.id = "alt-t-model".into();
     assert_eq!(app.state.thinking, ThinkingConfig::Off);
 
     press(&mut app, KeyCode::Char('t'), KeyModifiers::ALT);
@@ -4564,6 +4567,7 @@ fn alt_t_cycles_thinking() {
 #[test]
 fn ctrl_shift_t_still_cycles_thinking() {
     let mut app = test_app();
+    app.state.model.id = "ctrl-shift-t-model".into();
     press(
         &mut app,
         KeyCode::Char('t'),
@@ -4585,12 +4589,16 @@ fn alt_i_toggles_transcript_details() {
 #[test]
 fn thinking_change_persists_model_memory() {
     let mut app = test_app();
+    app.state.model.id = "persist-memory-model".into();
     app.execute_command(ParsedCommand {
         name: "/thinking".into(),
         args: "high".into(),
     });
     let raw = std::fs::read_to_string(app.storage.path().join("model-thinking")).unwrap();
-    assert!(raw.contains("anthropic/test-model"), "memory file: {raw}");
+    assert!(
+        raw.contains("anthropic/persist-memory-model"),
+        "memory file: {raw}"
+    );
     assert!(raw.contains("high"), "memory file: {raw}");
 }
 
@@ -4615,6 +4623,8 @@ fn update_model_applies_remembered_thinking() {
 #[test]
 fn same_spec_update_keeps_session_thinking() {
     let mut app = test_app();
+    app.state.model.id = "same-spec-model".into();
+    app.state.session.model = app.state.model.spec();
     n00n_providers::model_registry::set_thinking_and_persist(
         app.state.model.spec(),
         n00n_storage::sessions::StoredThinking::Effort {
@@ -4625,6 +4635,7 @@ fn same_spec_update_keeps_session_thinking() {
     app.state.thinking = ThinkingConfig::Effort(Effort::Low);
 
     let mut same_spec = test_model();
+    same_spec.id = "same-spec-model".into();
     same_spec.context_window = 999_999;
     app.update_model(&same_spec);
     assert_eq!(app.state.thinking, ThinkingConfig::Effort(Effort::Low));
@@ -4633,6 +4644,7 @@ fn same_spec_update_keeps_session_thinking() {
 #[test]
 fn update_model_without_memory_keeps_thinking() {
     let mut app = test_app();
+    app.state.model.id = "no-memory-model".into();
     app.execute_command(ParsedCommand {
         name: "/thinking".into(),
         args: "low".into(),
