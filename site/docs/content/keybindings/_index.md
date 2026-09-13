@@ -48,6 +48,11 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+Del` / `Alt+D` | Delete word forward |
 | `Ctrl+←` / `Ctrl+→` | Move word left / right |
 | `Alt+←` / `Alt+→` | Move word left / right |
+| `Shift+←` / `Shift+→` | Select char left / right |
+| `Shift+↑` / `Shift+↓` | Select line up / down |
+| `Shift+Home` / `Shift+End` | Select to line start / end |
+| `Ctrl+Shift+←` / `Ctrl+Shift+→` | Select word left / right |
+| `Ctrl+Shift+A` | Select all input |
 | `Ctrl+K` | Delete to end of line |
 | `Ctrl+U` | Delete to start of line |
 | `Ctrl+Y` | Paste deleted text |

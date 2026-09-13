@@ -156,6 +156,16 @@ pub enum KeyAction {
     WordRight,
     LineStart,
     LineEnd,
+    // Composer selection (shift-motion)
+    SelectCharLeft,
+    SelectCharRight,
+    SelectWordLeft,
+    SelectWordRight,
+    SelectLineStart,
+    SelectLineEnd,
+    SelectUp,
+    SelectDown,
+    SelectAll,
     // Deletion + kill ring
     DeleteCharBack,
     DeleteCharForward,
@@ -444,6 +454,73 @@ pub static BINDINGS: &[(KeybindContext, &[KeyBinding])] = &[
             ),
             bind!(alt!('b'), KeyAction::WordLeft, None, "Move word left"),
             bind!(alt!('f'), KeyAction::WordRight, None, "Move word right"),
+            // Shift-motion selection needs Kitty DISAMBIGUATE+ALTERNATE to
+            // arrive as distinct events; on terminals without it these
+            // binds are simply unreachable and arrows stay plain motion.
+            bind!(
+                modified!(Left, KeyModifiers::SHIFT),
+                KeyAction::SelectCharLeft,
+                Some(KeyLabel::Alt("Shift+←", "Shift+→")),
+                "Select char left / right"
+            ),
+            bind!(
+                modified!(Right, KeyModifiers::SHIFT),
+                KeyAction::SelectCharRight,
+                None,
+                "Select char right"
+            ),
+            bind!(
+                modified!(Up, KeyModifiers::SHIFT),
+                KeyAction::SelectUp,
+                Some(KeyLabel::Alt("Shift+↑", "Shift+↓")),
+                "Select line up / down"
+            ),
+            bind!(
+                modified!(Down, KeyModifiers::SHIFT),
+                KeyAction::SelectDown,
+                None,
+                "Select line down"
+            ),
+            bind!(
+                modified!(Home, KeyModifiers::SHIFT),
+                KeyAction::SelectLineStart,
+                Some(KeyLabel::Alt("Shift+Home", "Shift+End")),
+                "Select to line start / end"
+            ),
+            bind!(
+                modified!(End, KeyModifiers::SHIFT),
+                KeyAction::SelectLineEnd,
+                None,
+                "Select to line end"
+            ),
+            bind!(
+                modified!(
+                    Left,
+                    KeyModifiers::from_bits_truncate(
+                        KeyModifiers::CONTROL.bits() | KeyModifiers::SHIFT.bits()
+                    )
+                ),
+                KeyAction::SelectWordLeft,
+                Some(KeyLabel::Alt("Ctrl+Shift+←", "Ctrl+Shift+→")),
+                "Select word left / right"
+            ),
+            bind!(
+                modified!(
+                    Right,
+                    KeyModifiers::from_bits_truncate(
+                        KeyModifiers::CONTROL.bits() | KeyModifiers::SHIFT.bits()
+                    )
+                ),
+                KeyAction::SelectWordRight,
+                None,
+                "Select word right"
+            ),
+            bind!(
+                ctrl_shift!('a'),
+                KeyAction::SelectAll,
+                Some(KeyLabel::Single("Ctrl+Shift+A")),
+                "Select all input"
+            ),
             bind!(
                 ctrl!('k'),
                 KeyAction::KillLineEnd,
