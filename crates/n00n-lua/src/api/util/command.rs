@@ -465,6 +465,7 @@ pub enum UiAction {
         close_requested: Arc<AtomicBool>,
     },
     Flash(String),
+    Notify(String),
     OpenEditor {
         path: PathBuf,
         reply_tx: flume::Sender<i32>,

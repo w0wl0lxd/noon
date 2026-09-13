@@ -74,6 +74,8 @@ All fields are optional. Typos in field names cause an error right away.
 | `mouse_scroll_lines` | u32 | `3` | 1 | Lines per mouse wheel scroll |
 | `max_input_lines` | u32 | `20` | 1 | Maximum visible input lines |
 | `show_thinking` | bool | `true` | - | When true (default), show full model reasoning live and persisted. When false, hide reasoning behind an indicator (thinking> ...) with a click-to-expand hint, both while thinking and after it completes |
+| `notifications` | off \| bell \| osc9 \| all | `"bell"` | - | Attention signal when a turn ends or input is required while the terminal is unfocused. "bell" rings the terminal bell, "osc9" emits a desktop-notification escape, "all" emits both. Set N00N_NOTIFICATIONS to override the file value |
+| `terminal_title` | bool | `true` | - | Set the terminal window title to the focused session title and state (OSC 2); the previous title is restored on exit where the terminal supports the title stack |
 
 ### `ui.theme`
 

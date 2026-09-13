@@ -282,6 +282,22 @@ fn flash(_lua: &Lua, #[ctx] tx: flume::Sender<UiAction>, msg: String) -> LuaResu
     Ok(())
 }
 
+/// Sends a desktop notification carrying {msg} through the terminal. The
+/// mechanism comes from `ui.notifications`: "bell" rings the terminal
+/// bell, "osc9" emits a desktop-notification escape, "all" does both, and
+/// "off" stays silent. Unlike the automatic turn-end signal, an explicit
+/// notify fires even while the terminal is focused.
+///
+/// @param msg string Notification text.
+/// @return
+/// @example
+/// n00n.ui.notify("Release build finished")
+#[lua_fn]
+fn notify(_lua: &Lua, #[ctx] tx: flume::Sender<UiAction>, msg: String) -> LuaResult<()> {
+    let _ = tx.try_send(UiAction::Notify(msg));
+    Ok(())
+}
+
 /// Opens {path} in the user's `$EDITOR` (e.g. vim, nano) and waits for
 /// it to close. This suspends the TUI while the editor is running.
 /// Returns the editor's exit code so you can check if the user saved.
@@ -504,7 +520,8 @@ lua_table! {
     extend "n00n.ui" => pub(crate) fn add_ui_fns(), DOCS [
         buf, theme_color, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
-        manual flash, manual open_editor, manual pick_model, manual open_win, manual set_status_hint,
+        manual flash, manual notify, manual open_editor, manual pick_model, manual open_win,
+        manual set_status_hint,
     ]
 }
 
@@ -518,6 +535,7 @@ pub(crate) fn create_ui_table(
 
     if let Some(tx) = ui_action_tx {
         flash__register(&t, lua, tx.clone())?;
+        notify__register(&t, lua, tx.clone())?;
         open_editor__register(&t, lua, tx.clone())?;
         pick_model__register(&t, lua, tx.clone())?;
         open_win__register(&t, lua, tx)?;

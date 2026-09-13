@@ -8,10 +8,19 @@ use crossterm::Command;
 use crossterm::ExecutableCommand;
 use crossterm::clipboard::CopyToClipboard;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use n00n_config::UiNotifications;
+
+/// xterm XTWINOPS: push the current window and icon titles onto the
+/// terminal's private title stack. Terminals without a title stack
+/// (alacritty, vte) ignore it; the matching pop then does nothing either.
+const TITLE_STACK_PUSH: &str = "\x1b[22;0t";
+/// XTWINOPS: restore the titles saved by [`TITLE_STACK_PUSH`].
+const TITLE_STACK_POP: &str = "\x1b[23;0t";
 
 pub(crate) struct TerminalGuard;
 
@@ -74,6 +83,12 @@ impl TerminalGuard {
         let guard = Self;
         stdout().execute(EnableBracketedPaste)?;
         stdout().execute(EnableMouseCapture)?;
+        if let Err(error) = stdout().execute(EnableFocusChange) {
+            tracing::warn!(error = %error, "failed to enable focus change reporting");
+        }
+        if let Err(error) = stdout().write_all(TITLE_STACK_PUSH.as_bytes()) {
+            tracing::warn!(error = %error, "failed to save terminal title");
+        }
         push_keyboard_enhancement();
         Ok((guard, terminal))
     }
@@ -82,6 +97,9 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         pop_terminal_modes();
+        if let Err(error) = stdout().write_all(TITLE_STACK_POP.as_bytes()) {
+            tracing::warn!(error = %error, "failed to restore terminal title");
+        }
         ratatui::restore();
     }
 }
@@ -98,6 +116,12 @@ pub(crate) fn suspend(terminal: &mut ratatui::DefaultTerminal) {
 
 fn teardown() {
     pop_terminal_modes();
+    // While suspended or inside $EDITOR the terminal belongs to the
+    // foreground process, so the saved pre-n00n title comes back until
+    // `resume` pushes and the event loop re-emits.
+    if let Err(error) = stdout().write_all(TITLE_STACK_POP.as_bytes()) {
+        tracing::warn!(error = %error, "failed to restore terminal title");
+    }
     if let Err(error) = terminal::disable_raw_mode() {
         tracing::warn!(error = %error, "failed to disable raw mode");
     }
@@ -122,6 +146,9 @@ fn pop_terminal_modes() {
     if let Err(error) = stdout().execute(DisableMouseCapture) {
         tracing::warn!(error = %error, "failed to disable mouse capture");
     }
+    if let Err(error) = stdout().execute(DisableFocusChange) {
+        tracing::warn!(error = %error, "failed to disable focus change reporting");
+    }
     if let Err(error) = stdout().execute(DisableBracketedPaste) {
         tracing::warn!(error = %error, "failed to disable bracketed paste");
     }
@@ -139,6 +166,12 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) {
     }
     if let Err(error) = stdout().execute(EnableMouseCapture) {
         tracing::warn!(error = %error, "failed to enable mouse capture");
+    }
+    if let Err(error) = stdout().execute(EnableFocusChange) {
+        tracing::warn!(error = %error, "failed to enable focus change reporting");
+    }
+    if let Err(error) = stdout().write_all(TITLE_STACK_PUSH.as_bytes()) {
+        tracing::warn!(error = %error, "failed to save terminal title");
     }
     push_keyboard_enhancement();
     if let Err(error) = terminal.clear() {
@@ -214,6 +247,56 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
         .write_ansi(&mut sequence)
         .map_err(|e| e.to_string())?;
     let sequence = TerminalMux::detect().wrap_for_mux(sequence);
+    write_sequence(&sequence)
+}
+
+/// Sets the window title with OSC 2. Unlike OSC 0 it does not churn the
+/// icon name (dock label, tab icon). Emitted raw: tmux and screen consume
+/// OSC titles natively and apply their own title policy, so the DCS
+/// passthrough wrap would be wrong here.
+pub(crate) fn set_window_title(title: &str) -> Result<(), String> {
+    write_sequence(&window_title_sequence(title))
+}
+
+/// Emits the attention signal selected by `ui.notifications`. The bell
+/// goes raw because tmux surfaces it as a window bell on its own; the
+/// OSC 9 desktop-notification body takes the mux passthrough so it can
+/// reach the outer terminal.
+pub(crate) fn notify(mode: UiNotifications, message: &str) -> Result<(), String> {
+    let Some(sequence) = notification_sequence(mode, message, &TerminalMux::detect()) else {
+        return Ok(());
+    };
+    write_sequence(&sequence)
+}
+
+fn window_title_sequence(title: &str) -> String {
+    format!("\x1b]2;{}\x07", strip_controls(title))
+}
+
+fn notification_sequence(
+    mode: UiNotifications,
+    message: &str,
+    mux: &TerminalMux,
+) -> Option<String> {
+    match mode {
+        UiNotifications::Off => None,
+        UiNotifications::Bell => Some("\x07".to_owned()),
+        UiNotifications::Osc9 => Some(osc9_sequence(message, mux)),
+        UiNotifications::All => Some(format!("\x07{}", osc9_sequence(message, mux))),
+    }
+}
+
+fn osc9_sequence(message: &str, mux: &TerminalMux) -> String {
+    mux.wrap_for_mux(format!("\x1b]9;{}\x07", strip_controls(message)))
+}
+
+/// BEL and ST both terminate an OSC payload, so control characters inside
+/// a title or message would end it early or leak into the terminal.
+fn strip_controls(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+fn write_sequence(sequence: &str) -> Result<(), String> {
     let mut stdout = stdout().lock();
     stdout
         .write_all(sequence.as_bytes())
@@ -332,5 +415,91 @@ mod tests {
             .expect("crossterm write_ansi");
         let wrapped = TerminalMux::Tmux.wrap_for_mux(sequence.clone());
         assert_eq!(parse_dcs_passthrough(&wrapped, "\u{1b}Ptmux;"), sequence);
+    }
+
+    #[test]
+    fn window_title_sequence_is_osc2_with_bel_terminator() {
+        assert_eq!(
+            window_title_sequence("n00n: fix the bug"),
+            "\u{1b}]2;n00n: fix the bug\x07"
+        );
+    }
+
+    #[test]
+    fn window_title_sequence_strips_control_characters() {
+        // A BEL inside the title would terminate the OSC early; an embedded
+        // ESC could inject arbitrary sequences.
+        assert_eq!(
+            window_title_sequence("n00n\x07\x1b[2J"),
+            "\u{1b}]2;n00n[2J\x07"
+        );
+    }
+
+    #[test]
+    fn notification_off_emits_nothing() {
+        assert_eq!(
+            notification_sequence(UiNotifications::Off, "turn complete", &TerminalMux::None),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_bell_is_a_bare_bel_in_every_mux() {
+        // BEL must not be DCS-wrapped: tmux raises a window bell on it
+        // natively, and wrapping would eat the signal.
+        for mux in [
+            TerminalMux::None,
+            TerminalMux::Zellij,
+            TerminalMux::Tmux,
+            TerminalMux::Screen,
+        ] {
+            assert_eq!(
+                notification_sequence(UiNotifications::Bell, "turn complete", &mux),
+                Some("\x07".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn notification_osc9_carries_the_message() {
+        assert_eq!(
+            notification_sequence(
+                UiNotifications::Osc9,
+                "n00n: turn complete",
+                &TerminalMux::None
+            ),
+            Some("\u{1b}]9;n00n: turn complete\x07".to_owned())
+        );
+    }
+
+    #[test]
+    fn notification_all_is_bell_then_osc9() {
+        assert_eq!(
+            notification_sequence(UiNotifications::All, "input required", &TerminalMux::None),
+            Some("\x07\u{1b}]9;input required\x07".to_owned())
+        );
+    }
+
+    #[test]
+    fn notification_osc9_survives_tmux_passthrough() {
+        let wrapped =
+            notification_sequence(UiNotifications::Osc9, "turn complete", &TerminalMux::Tmux)
+                .expect("osc9 emits a sequence");
+        assert_eq!(
+            parse_dcs_passthrough(&wrapped, "\u{1b}Ptmux;"),
+            "\u{1b}]9;turn complete\x07"
+        );
+    }
+
+    #[test]
+    fn notification_message_is_sanitized() {
+        assert_eq!(
+            notification_sequence(
+                UiNotifications::Osc9,
+                "done\x07\x1b]8;;x",
+                &TerminalMux::None
+            ),
+            Some("\u{1b}]9;done]8;;x\x07".to_owned())
+        );
     }
 }

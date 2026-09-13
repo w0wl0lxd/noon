@@ -8129,6 +8129,30 @@ fn job_callbacks_fire_while_command_handler_parked() {
 }
 
 #[test]
+fn ui_notify_forwards_message_to_the_event_loop() {
+    let host = PluginHost::new(fresh_registry()).unwrap();
+    host.load_source(
+        "p",
+        r#"
+        n00n.api.register_command({
+            name = "/ping",
+            description = "sends a notification",
+            handler = function() n00n.ui.notify("turn done") end,
+        })
+        "#,
+    )
+    .unwrap();
+    let rx = host.ui_action_rx().unwrap();
+    let handle = host.event_handle().unwrap();
+    handle.run_command(Arc::from("p"), Arc::from("/ping"), String::new(), None);
+
+    let action = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("n00n.ui.notify did not reach the UI action channel");
+    assert!(matches!(action, n00n_lua::UiAction::Notify(msg) if msg == "turn done"));
+}
+
+#[test]
 fn skill_tool_list_returns_catalog() {
     let (reg, _host) = builtins_host();
     let out = exec_tool(&reg, "skill", serde_json::json!({"list": true})).unwrap();
