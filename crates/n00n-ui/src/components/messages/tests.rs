@@ -380,7 +380,7 @@ fn jump_to_bottom_popup_appears_when_scrolled_up() {
     assert_eq!(popup.height, JUMP_TO_BOTTOM_POPUP_HEIGHT);
     let text = buffer_text(&terminal);
     assert!(text.contains(JUMP_TO_BOTTOM_TEXT));
-    assert!(text.contains(key::SCROLL_BOTTOM.label));
+    assert!(text.contains(key::CHAT_SCROLL_BOTTOM.label));
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer.cell((popup.x, popup.y)).unwrap().symbol(), "╭");
     assert_eq!(

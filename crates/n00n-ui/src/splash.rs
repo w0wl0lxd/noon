@@ -17,10 +17,7 @@ const HELP_SEGMENTS: &[(&str, bool)] = &[
 ];
 
 const TIPS: &[(&str, &str)] = &[
-    (
-        key::FILE_PICKER.label,
-        "to grab file paths with fuzzy search",
-    ),
+    (key::STASH.label, "to stash your draft and restore it later"),
     ("@", "to mention a file in your prompt"),
     (key::TASKS.label, "to see what your subagents are up to"),
     (key::SEARCH.label, "to find things in the conversation"),

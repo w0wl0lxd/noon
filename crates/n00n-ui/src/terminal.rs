@@ -147,9 +147,12 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) {
 }
 
 fn push_keyboard_enhancement() {
-    if let Err(e) = stdout().execute(PushKeyboardEnhancementFlags(
-        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-    )) {
+    // DISAMBIGUATE splits Ctrl+I/Tab, Ctrl+M/Enter, and bare Esc; ALTERNATE
+    // reports shifted forms (Shift+Enter, Ctrl+Shift+C) reliably. Terminals
+    // without the protocol ignore the push and keep legacy delivery.
+    let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+    if let Err(e) = stdout().execute(PushKeyboardEnhancementFlags(flags)) {
         tracing::warn!(error = %e, "failed to enable keyboard enhancement (Kitty protocol)");
     }
 }

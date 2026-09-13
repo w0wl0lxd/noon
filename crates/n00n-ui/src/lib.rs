@@ -14,6 +14,7 @@ pub use components::command::{BUILTIN_COMMANDS, BuiltinCommand};
 pub use components::keybindings;
 mod highlight;
 pub use highlight::highlight_ansi;
+mod keymap;
 pub use theme::BUNDLED_THEMES;
 pub mod image;
 mod markdown;

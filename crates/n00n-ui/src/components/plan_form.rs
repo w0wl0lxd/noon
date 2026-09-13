@@ -315,7 +315,7 @@ mod tests {
 
     #[test_case(key(KeyCode::Esc)              ; "esc")]
     #[test_case(key::QUIT.to_key_event()      ; "ctrl_c")]
-    #[test_case(key::PLAN_TOGGLE.to_key_event(); "ctrl_t")]
+    #[test_case(key::PLAN_TOGGLE.to_key_event(); "alt_p")]
     fn dismiss(k: KeyEvent) {
         let mut form = PlanForm::new();
         form.on_plan_ready();
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_o_opens_editor() {
+    fn open_editor_key_opens_editor() {
         let mut form = PlanForm::new();
         form.on_plan_ready();
         assert_eq!(

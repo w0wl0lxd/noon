@@ -31,8 +31,8 @@ use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
-use crate::components::input::{InputAction, InputBox, Submission};
-use crate::components::keybindings::key;
+use crate::components::input::{InputAction, InputBox, StashOutcome, Submission};
+use crate::components::keybindings::{KeybindContext, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
@@ -49,9 +49,10 @@ use crate::components::tool_display::format_turn_usage;
 use crate::components::usage_modal::{UsageFetchState, UsageModal};
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status,
-    SubmissionDispatch, is_ctrl,
+    SubmissionDispatch,
 };
 use crate::image;
+use crate::keymap::{self, KeyAction};
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
@@ -87,7 +88,6 @@ pub(super) const SUBMISSION_ESCAPE_WINDOW: Duration = Duration::from_millis(2_50
 /// Bypasses the per-run staleness filter because re-bake replies
 /// don't belong to any real agent run.
 pub(crate) const RESTORE_RUN_ID: u64 = u64::MAX;
-const FLASH_CANCEL: &str = "Press esc again to stop...";
 const FLASH_REWIND: &str = "Press esc again to rewind...";
 const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `n00n auth login` in another terminal, then press Enter to retry.";
@@ -116,7 +116,7 @@ const TASK_RUNNING_DETAIL: &str = "◈ running";
 const STEERING_UNAVAILABLE_MSG: &str = "This agent is no longer accepting messages";
 const STEERING_BUSY_MSG: &str = "This agent is busy; try again in a moment";
 const TASK_PANEL_FOOTER: &[(&str, &str)] =
-    &[("enter", "open"), ("ctrl+x", "toggle"), ("esc", "close")];
+    &[("enter", "open"), ("ctrl+t", "toggle"), ("esc", "close")];
 
 enum SubagentPromptError {
     Finished,
@@ -282,6 +282,7 @@ pub struct App {
     pub(super) scrollbar_drag: Option<mouse::ScrollbarDrag>,
     pub(super) clipboard: ClipboardState,
     pub(super) last_esc: Option<Instant>,
+    last_ctrl_d: Option<Instant>,
 
     pub(crate) storage: StateDir,
     pub(crate) usage_slot: Arc<ArcSwapOption<UsageFetchState>>,
@@ -410,6 +411,7 @@ impl App {
             scrollbar_drag: None,
             clipboard: ClipboardState::new(),
             last_esc: None,
+            last_ctrl_d: None,
             storage,
             usage_slot: Arc::new(ArcSwapOption::empty()),
             shared_history: None,
@@ -743,70 +745,6 @@ impl App {
         self.task_picker.select(self.active_chat);
     }
 
-    fn handle_ctrl(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
-        if !is_ctrl(&key) {
-            return None;
-        }
-        if key::QUIT.matches(key) {
-            self.command_palette.close();
-            if self.queue.cancel_editing() {
-                self.input_box.discard();
-                return Some(vec![]);
-            }
-            return Some(if !self.is_main_chat() || self.input_box.is_empty() {
-                if self.status == Status::Streaming {
-                    return Some(self.handle_cancel());
-                }
-                self.quit()
-            } else {
-                self.input_box.discard();
-                vec![]
-            });
-        }
-        if key::HELP.matches(key) {
-            self.help_modal.toggle();
-            return Some(vec![]);
-        }
-        if key::TASKS.matches(key) {
-            self.open_tasks();
-            return Some(vec![]);
-        }
-        if key::PREV_CHAT.matches(key) {
-            self.active_chat = self.active_chat.saturating_sub(1);
-            return Some(vec![]);
-        }
-        if key::NEXT_CHAT.matches(key) {
-            self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
-            return Some(vec![]);
-        }
-        if key::SCROLL_HALF_UP.matches(key) {
-            let half = self.chats[self.active_chat].half_page();
-            self.active_chat().scroll(half);
-            return Some(vec![]);
-        }
-        if key::SCROLL_HALF_DOWN.matches(key) {
-            let half = self.chats[self.active_chat].half_page();
-            self.active_chat().scroll(-half);
-            return Some(vec![]);
-        }
-        if key::SCROLL_TOP.matches(key) {
-            self.active_chat().scroll_to_top();
-            return Some(vec![]);
-        }
-        if key::SCROLL_BOTTOM.matches(key) {
-            self.active_chat().jump_to_bottom();
-            return Some(vec![]);
-        }
-        if key::PLAN_TOGGLE.matches(key)
-            && self.state.mode == Mode::Plan
-            && self.state.plan.is_ready()
-        {
-            self.plan_form.toggle();
-            return Some(vec![]);
-        }
-        None
-    }
-
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
@@ -1014,6 +952,24 @@ impl App {
         None
     }
 
+    /// Active keymap contexts, most specific first. Overlays consume their
+    /// keys before this stack is consulted.
+    fn context_stack(&self) -> Vec<KeybindContext> {
+        let mut stack = Vec::with_capacity(5);
+        if self.input_box.history_search_active() {
+            stack.push(KeybindContext::HistorySearch);
+        }
+        if !self.is_main_chat() {
+            stack.push(KeybindContext::SubagentChat);
+        }
+        if self.status == Status::Streaming {
+            stack.push(KeybindContext::Streaming);
+        }
+        stack.push(KeybindContext::Editing);
+        stack.push(KeybindContext::General);
+        stack
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         self.clear_selection_unless_pending_copy();
 
@@ -1031,22 +987,44 @@ impl App {
             return vec![];
         }
 
-        if let Some(actions) = self.handle_ctrl(key) {
-            return actions;
+        if let Some(action) = keymap::resolve(&self.context_stack(), key) {
+            return self.perform(action, key);
         }
 
-        if !self.is_main_chat() {
-            return self.handle_subagent_chat_key(key);
+        if keymap::reaches_composer(&key) {
+            return self.handle_composer_key(key);
         }
 
-        self.handle_main_chat_key(key)
+        vec![]
+    }
+
+    /// Unbound plain keys (printable input, `@` trigger) reach the composer.
+    /// Modified chords that matched no binding are dead by design.
+    fn handle_composer_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // Any real keypress breaks pending double-press confirmations.
+        self.last_esc = None;
+        self.last_ctrl_d = None;
+        match self.input_box.handle_key(key) {
+            InputAction::PaletteSync(val) if self.is_main_chat() => {
+                self.command_palette.sync(&val);
+            }
+            InputAction::OpenFilePicker if self.is_main_chat() => {
+                self.file_picker.open_via_at(&self.state.session.cwd);
+            }
+            _ => {}
+        }
+        vec![]
     }
 
     fn dispatch_override(&self, key: KeyEvent) -> bool {
         let snap = self.keymap_reader.load();
+        let stroke = keymap::KeyStroke::normalize(key);
         for entry in &snap.entries {
-            if entry.key == key.code
-                && entry.modifiers == key.modifiers
+            // Lua spells shift either as `<C-S-t>` (flag) or `<C-T>`
+            // (uppercase codepoint) — normalize both sides before compare.
+            let want = keymap::KeyStroke::normalize_parts(entry.key, entry.modifiers);
+            if want.code == stroke.code
+                && want.modifiers == stroke.modifiers
                 && let Some(ref handle) = self.lua_event_handle
                 && handle.run_keybind_callback(entry.id)
             {
@@ -1056,178 +1034,306 @@ impl App {
         false
     }
 
-    fn handle_subagent_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let finished = self.chats[self.active_chat].is_finished();
-        if key.code == KeyCode::Left {
-            self.active_chat = 0;
-            self.last_esc = None;
-            return vec![];
-        }
-        if finished && key.code == KeyCode::Esc {
-            self.active_chat = 0;
-            return vec![];
-        }
-        if key.code != KeyCode::Esc {
+    fn perform(&mut self, action: KeyAction, key: KeyEvent) -> Vec<Action> {
+        if !matches!(action, KeyAction::Escape | KeyAction::SubagentEscape) {
             self.last_esc = None;
         }
+        if action != KeyAction::ExitOrDeleteChar {
+            self.last_ctrl_d = None;
+        }
+        let streaming = self.status == Status::Streaming;
 
-        match self.input_box.handle_key(key) {
-            InputAction::Submit(sub) => self.handle_submit(sub),
-            InputAction::Passthrough(key) if key.code == KeyCode::Esc => {
-                if let Some(t) = self.last_esc.take()
-                    && t.elapsed() < self.status_bar.flash_duration
-                {
-                    self.handle_subagent_cancel()
-                } else {
-                    self.last_esc = Some(Instant::now());
-                    self.status_bar.flash(FLASH_CANCEL.into());
-                    vec![]
+        // The completion popup intercepts navigation/submit keys while open.
+        if self.is_main_chat() && !self.input_box.history_search_active() {
+            match self
+                .command_palette
+                .handle_key(key, &self.input_box.buffer.value())
+            {
+                CommandAction::Consumed => return vec![],
+                CommandAction::Execute(cmd) => return self.execute_command(cmd),
+                CommandAction::Complete(text) => {
+                    self.command_palette.sync(&text);
+                    self.input_box.set_input(&text);
+                    self.input_box.buffer.move_to_end();
+                    return vec![];
                 }
+                CommandAction::Passthrough => {}
             }
-            InputAction::Passthrough(_)
-            | InputAction::ContinueLine
-            | InputAction::None
-            | InputAction::OpenFilePicker
-            | InputAction::PaletteSync(_) => vec![],
         }
-    }
 
-    fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        if key::TRANSCRIPT_DETAILS.matches(key) {
-            let visible = self.active_chat().toggle_transcript_details();
-            self.flash(
-                if visible {
-                    "Transcript details shown"
-                } else {
-                    "Transcript details hidden"
+        match action {
+            KeyAction::QuitOrCancel => {
+                self.command_palette.close();
+                if self.input_box.history_search_active() {
+                    self.input_box.history_search_cancel();
+                    return vec![];
                 }
-                .into(),
-            );
-            return vec![];
-        }
-        if key::THINKING_ALT.matches(key) {
-            self.cycle_thinking();
-            return vec![];
-        }
-        if key::EDIT_INPUT.matches(key) {
-            return vec![Action::EditInputInEditor];
-        }
-        if is_ctrl(&key) {
-            if key::POP_QUEUE.matches(key) {
-                self.queue.remove(0);
-            } else if key::OPEN_EDITOR.matches(key) {
-                return if let Some(p) = self.state.plan.path() {
+                if self.queue.cancel_editing() {
+                    self.input_box.discard();
+                    return vec![];
+                }
+                if !self.is_main_chat() || self.input_box.is_empty() {
+                    if streaming {
+                        return self.handle_cancel();
+                    }
+                    return self.quit();
+                }
+                self.input_box.discard();
+                vec![]
+            }
+            KeyAction::HelpToggle => {
+                self.help_modal.toggle();
+                vec![]
+            }
+            KeyAction::Redraw => vec![Action::Redraw],
+            KeyAction::Suspend => vec![Action::Suspend],
+            KeyAction::ChatPrev => {
+                self.active_chat = self.active_chat.saturating_sub(1);
+                vec![]
+            }
+            KeyAction::ChatNext => {
+                self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
+                vec![]
+            }
+            KeyAction::ScrollHalfUp => {
+                let half = self.chats[self.active_chat].half_page();
+                self.active_chat().scroll(half);
+                vec![]
+            }
+            KeyAction::ScrollHalfDown => {
+                let half = self.chats[self.active_chat].half_page();
+                self.active_chat().scroll(-half);
+                vec![]
+            }
+            KeyAction::ScrollPageUp => {
+                let page = self.chats[self.active_chat].half_page() * 2;
+                self.active_chat().scroll(page);
+                vec![]
+            }
+            KeyAction::ScrollPageDown => {
+                let page = self.chats[self.active_chat].half_page() * 2;
+                self.active_chat().scroll(-page);
+                vec![]
+            }
+            KeyAction::ScrollTop => {
+                self.active_chat().scroll_to_top();
+                vec![]
+            }
+            KeyAction::ScrollBottom => {
+                self.active_chat().jump_to_bottom();
+                vec![]
+            }
+            KeyAction::SearchOpen => {
+                let top = self.chats[self.active_chat].scroll_top();
+                let auto = self.chats[self.active_chat].auto_scroll();
+                self.search_modal.open(top, auto);
+                vec![]
+            }
+            KeyAction::TranscriptDetails => {
+                let visible = self.active_chat().toggle_transcript_details();
+                self.flash(
+                    if visible {
+                        "Transcript details shown"
+                    } else {
+                        "Transcript details hidden"
+                    }
+                    .into(),
+                );
+                vec![]
+            }
+            KeyAction::ThinkingCycle => {
+                self.cycle_thinking();
+                vec![]
+            }
+            KeyAction::TasksOpen => {
+                self.open_tasks();
+                vec![]
+            }
+            KeyAction::PlanToggle => {
+                if self.state.mode == Mode::Plan && self.state.plan.is_ready() {
+                    self.plan_form.toggle();
+                }
+                vec![]
+            }
+            KeyAction::EditorOpenInput => {
+                // The editor seeds from the live buffer — restore the
+                // pre-search draft first so a shown match isn't edited.
+                self.input_box.history_search_cancel();
+                vec![Action::EditInputInEditor]
+            }
+            KeyAction::EditorOpenPlan => {
+                if let Some(p) = self.state.plan.path() {
                     vec![Action::OpenEditor(p.to_path_buf())]
                 } else {
                     self.flash(FLASH_NO_PLAN.into());
                     vec![]
-                };
-            } else if key::SEARCH.matches(key) {
-                let top = self.chats[self.active_chat].scroll_top();
-                let auto = self.chats[self.active_chat].auto_scroll();
-                self.search_modal.open(top, auto);
-            } else if key::FILE_PICKER.matches(key) {
-                self.file_picker.open(&self.state.session.cwd);
-            } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
-                self.start_image_paste();
-            } else if key::THINKING.matches(key) {
-                self.cycle_thinking();
-                return vec![];
-            } else if key::COPY.matches(key) {
+                }
+            }
+            KeyAction::CopySelection => {
                 if let Some(SelectionState::Dragging { sel, .. }) = self.selection_state.take()
                     && !sel.is_empty()
                 {
                     self.selection_state = Some(SelectionState::PendingCopy { sel });
                 }
-            } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
-                self.command_palette.sync(&val);
-            }
-            return vec![];
-        }
-
-        match self
-            .command_palette
-            .handle_key(key, &self.input_box.buffer.value())
-        {
-            CommandAction::Consumed => return vec![],
-            CommandAction::Execute(cmd) => return self.execute_command(cmd),
-            CommandAction::Complete(text) => {
-                self.command_palette.sync(&text);
-                self.input_box.set_input(&text);
-                self.input_box.buffer.move_to_end();
-                return vec![];
-            }
-            CommandAction::Passthrough => {}
-        }
-
-        let streaming = self.status == Status::Streaming;
-        match self.input_box.handle_key(key) {
-            InputAction::Submit(sub) => self.handle_submit(sub),
-            InputAction::OpenFilePicker => {
-                self.file_picker.open_via_at(&self.state.session.cwd);
                 vec![]
             }
-            InputAction::PaletteSync(val) => {
-                self.command_palette.sync(&val);
-                vec![]
-            }
-            InputAction::Passthrough(key) => {
-                if key.code != KeyCode::Esc {
-                    self.last_esc = None;
+            KeyAction::ImagePaste => {
+                if self.image_paste_rx.is_empty() {
+                    self.start_image_paste();
                 }
-                match key.code {
-                    KeyCode::Up if streaming => {
-                        self.active_chat().scroll(1);
-                        vec![]
-                    }
-                    KeyCode::Down if streaming => {
-                        self.active_chat().scroll(-1);
-                        vec![]
-                    }
-                    KeyCode::Tab
-                        if streaming && !self.input_box.is_empty() && !self.is_bash_input() =>
-                    {
-                        if let Some(sub) = self.input_box.submit() {
-                            let msg = sub.into();
-                            if self.queue.editing().is_some() {
-                                self.replace_edited(msg);
-                            } else {
-                                self.queue_and_notify(msg);
-                            }
-                        }
-                        vec![]
-                    }
-                    KeyCode::Tab if !self.is_bash_input() => self.toggle_mode(),
-                    KeyCode::Esc => {
-                        if self.try_restore_pending_submission() {
-                            return vec![];
-                        }
-                        if let Some(t) = self.last_esc.take()
-                            && t.elapsed() < self.status_bar.flash_duration
-                        {
-                            if streaming {
-                                self.handle_cancel()
-                            } else {
-                                self.open_rewind_picker()
-                            }
+                vec![]
+            }
+            KeyAction::QueuePop => {
+                self.queue.remove(0);
+                vec![]
+            }
+            KeyAction::Submit => {
+                if self.input_box.char_before_cursor_is_backslash() {
+                    self.input_box.continue_line();
+                    return vec![];
+                }
+                match self.input_box.submit() {
+                    Some(sub) => self.handle_submit(sub),
+                    None => self.handle_submit(Submission::empty()),
+                }
+            }
+            KeyAction::TabOrMode => {
+                if self.is_bash_input() || !self.is_main_chat() {
+                    return vec![];
+                }
+                if streaming && !self.input_box.is_empty() {
+                    if let Some(sub) = self.input_box.submit() {
+                        let msg = sub.into();
+                        if self.queue.editing().is_some() {
+                            self.replace_edited(msg);
                         } else {
-                            self.last_esc = Some(Instant::now());
-                            self.status_bar.flash(
-                                if streaming {
-                                    FLASH_CANCEL
-                                } else {
-                                    FLASH_REWIND
-                                }
-                                .into(),
-                            );
-                            vec![]
+                            self.queue_and_notify(msg);
                         }
                     }
-                    _ => vec![],
+                    vec![]
+                } else {
+                    self.toggle_mode()
                 }
             }
-            InputAction::ContinueLine | InputAction::None => vec![],
+            KeyAction::Escape => {
+                if self.try_restore_pending_submission() {
+                    return vec![];
+                }
+                if let Some(t) = self.last_esc.take()
+                    && t.elapsed() < self.status_bar.flash_duration
+                {
+                    self.open_rewind_picker()
+                } else {
+                    self.last_esc = Some(Instant::now());
+                    self.status_bar.flash(FLASH_REWIND.into());
+                    vec![]
+                }
+            }
+            KeyAction::ExitOrDeleteChar => {
+                if !self.input_box.buffer.value().is_empty() {
+                    return self.run_edit(KeyAction::DeleteCharForward);
+                }
+                if let Some(t) = self.last_ctrl_d.take()
+                    && t.elapsed() < self.status_bar.flash_duration
+                {
+                    return self.quit();
+                }
+                self.last_ctrl_d = Some(Instant::now());
+                self.status_bar.flash("Press Ctrl+D again to exit".into());
+                vec![]
+            }
+            KeyAction::StashToggle => {
+                match self.input_box.stash_toggle() {
+                    StashOutcome::Stashed => self.status_bar.flash("Draft stashed".into()),
+                    StashOutcome::Restored => {
+                        self.command_palette.sync(&self.input_box.buffer.value());
+                        self.status_bar.flash("Draft restored".into());
+                    }
+                    StashOutcome::NothingToStash => {
+                        self.status_bar.flash("Nothing to stash".into());
+                    }
+                    StashOutcome::Occupied => self
+                        .status_bar
+                        .flash("Stash already occupied — restore it first".into()),
+                }
+                vec![]
+            }
+            KeyAction::HistorySearch => {
+                self.input_box.start_history_search();
+                vec![]
+            }
+            KeyAction::CancelAgent => {
+                if self.try_restore_pending_submission() {
+                    return vec![];
+                }
+                if self.is_main_chat() {
+                    self.handle_cancel()
+                } else {
+                    self.handle_subagent_cancel()
+                }
+            }
+            KeyAction::SubagentBack => {
+                self.active_chat = 0;
+                vec![]
+            }
+            KeyAction::SubagentEscape => {
+                if self.chats[self.active_chat].is_finished() {
+                    self.active_chat = 0;
+                    return vec![];
+                }
+                self.handle_subagent_cancel()
+            }
+            KeyAction::HistorySearchAccept => {
+                self.input_box.history_search_accept();
+                vec![]
+            }
+            KeyAction::HistorySearchCancel => {
+                self.input_box.history_search_cancel();
+                vec![]
+            }
+            KeyAction::HistorySearchOlder => {
+                self.input_box.history_search_older();
+                vec![]
+            }
+            KeyAction::HistorySearchNewer => {
+                self.input_box.history_search_newer();
+                vec![]
+            }
+            KeyAction::HistorySearchBackspace => {
+                self.input_box.history_search_backspace();
+                vec![]
+            }
+            KeyAction::InputUp
+            | KeyAction::InputDown
+            | KeyAction::CharLeft
+            | KeyAction::CharRight
+            | KeyAction::WordLeft
+            | KeyAction::WordRight
+            | KeyAction::LineStart
+            | KeyAction::LineEnd
+            | KeyAction::DeleteCharBack
+            | KeyAction::DeleteCharForward
+            | KeyAction::DeleteWordBack
+            | KeyAction::DeleteWordForward
+            | KeyAction::KillLineEnd
+            | KeyAction::KillLineStart
+            | KeyAction::Yank
+            | KeyAction::YankPop
+            | KeyAction::Undo
+            | KeyAction::Redo
+            | KeyAction::Newline => self.run_edit(action),
         }
+    }
+
+    /// Forward a resolved editing action into the composer and keep the
+    /// command palette in sync with buffer changes.
+    fn run_edit(&mut self, action: KeyAction) -> Vec<Action> {
+        if let InputAction::PaletteSync(val) = self.input_box.edit_action(action)
+            && self.is_main_chat()
+        {
+            self.command_palette.sync(&val);
+        }
+        vec![]
     }
 
     fn quit(&mut self) -> Vec<Action> {

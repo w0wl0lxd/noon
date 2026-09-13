@@ -1278,7 +1278,7 @@ impl MessagesPanel {
         let line = Line::from(vec![
             Span::styled(JUMP_TO_BOTTOM_TEXT, text_style),
             Span::raw(JUMP_TO_BOTTOM_KEY_GAP),
-            Span::styled(key::SCROLL_BOTTOM.label, keybind_style),
+            Span::styled(key::CHAT_SCROLL_BOTTOM.label, keybind_style),
         ]);
         let text_width = u16::try_from(line.width()).unwrap_or_else(|_| u16::MAX);
 

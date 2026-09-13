@@ -99,7 +99,7 @@ pub enum PermissionPrompt {
         subagent_id: Option<String>,
         allow_scopes: Vec<String>,
         state: PromptState,
-        buffer: TextBuffer,
+        buffer: Box<TextBuffer>,
     },
 }
 
@@ -135,7 +135,7 @@ impl PermissionPrompt {
             subagent_id,
             allow_scopes,
             state: PromptState::Normal,
-            buffer: TextBuffer::new(""),
+            buffer: Box::new(TextBuffer::new("")),
         };
     }
 
@@ -164,7 +164,7 @@ impl PermissionPrompt {
                     }
                 }
                 KeyCode::Esc => {
-                    *buffer = TextBuffer::new("");
+                    **buffer = TextBuffer::new("");
                     *state = PromptState::Normal;
                     None
                 }

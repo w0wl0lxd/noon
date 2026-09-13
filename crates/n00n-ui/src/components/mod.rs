@@ -224,6 +224,7 @@ pub enum Action {
     EditInputInEditor,
     Btw(String),
     Suspend,
+    Redraw,
 }
 
 const ERROR_DISPLAY: Duration = Duration::from_secs(5);

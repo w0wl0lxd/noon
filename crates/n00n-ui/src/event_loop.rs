@@ -3244,6 +3244,11 @@ impl<'t> EventLoop<'t> {
                 Ok(_pause) => terminal::suspend(self.terminal),
                 Err(e) => self.sessions[idx].app.flash(e),
             },
+            Action::Redraw => {
+                if let Err(e) = self.terminal.clear() {
+                    self.sessions[idx].app.flash(e.to_string());
+                }
+            }
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
         }

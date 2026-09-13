@@ -422,7 +422,7 @@ fn escape_before_dispatch_restores_text_and_exact_images_once() {
 }
 
 #[test]
-fn committed_submission_keeps_double_escape_cancellation() {
+fn committed_submission_esc_cancels_agent() {
     let mut app = test_app();
     install_manual_submission_clock(&mut app);
     let actions = type_and_submit(&mut app, "sent");
@@ -431,13 +431,10 @@ fn committed_submission_keeps_double_escape_cancellation() {
     };
     assert!(dispatch.gate.try_commit());
 
-    let first = app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(first.is_empty());
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(matches!(&actions[..], [Action::CancelAgent { .. }]));
     assert!(app.input_box.is_empty());
-    assert_eq!(app.main_chat().last_message_text(), "sent");
-
-    let second = app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(matches!(&second[..], [Action::CancelAgent { .. }]));
+    assert_eq!(app.main_chat().last_message_text(), "Cancelled.");
 }
 
 #[test]
@@ -509,7 +506,7 @@ fn escape_during_mcp_error_restores_and_resubmits_exactly_once() {
 }
 
 #[test]
-fn expired_escape_window_does_not_restore_without_sleeping() {
+fn expired_escape_window_esc_cancels_agent() {
     let mut app = test_app();
     let clock = install_manual_submission_clock(&mut app);
     type_and_submit(&mut app, "too late");
@@ -517,10 +514,10 @@ fn expired_escape_window_does_not_restore_without_sleeping() {
 
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
 
-    assert!(actions.is_empty());
+    assert!(matches!(&actions[..], [Action::CancelAgent { .. }]));
     assert!(app.input_box.is_empty());
-    assert_eq!(app.main_chat().last_message_text(), "too late");
-    assert_eq!(app.status, Status::Streaming);
+    assert_eq!(app.main_chat().last_message_text(), "Cancelled.");
+    assert_eq!(app.status, Status::Idle);
 }
 
 #[test]
@@ -537,15 +534,16 @@ fn escape_at_submission_window_boundary_restores() {
 }
 
 #[test]
-fn escape_one_millisecond_after_submission_window_does_not_restore() {
+fn escape_after_submission_window_cancels_agent() {
     let mut app = test_app();
     let clock = install_manual_submission_clock(&mut app);
     type_and_submit(&mut app, "after boundary");
     clock.advance(SUBMISSION_ESCAPE_WINDOW + Duration::from_millis(1));
 
-    app.update(Msg::Key(key(KeyCode::Esc)));
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
 
-    assert_eq!(app.status, Status::Streaming);
+    assert!(matches!(&actions[..], [Action::CancelAgent { .. }]));
+    assert_eq!(app.status, Status::Idle);
     assert!(app.input_box.is_empty());
 }
 
@@ -1717,12 +1715,203 @@ fn at_mention_does_not_open_mid_word() {
 }
 
 #[test]
-fn ctrl_s_file_picker_unaffected_by_at_mention_flag() {
+fn ctrl_s_stashes_and_restores_draft() {
     let mut app = test_app();
+    for c in "draft".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+
+    app.update(Msg::Key(kb::STASH.to_key_event()));
+    assert!(app.input_box.is_empty());
+    assert_eq!(app.status_bar.flash_text(), Some("Draft stashed"));
+
+    app.update(Msg::Key(kb::STASH.to_key_event()));
+    assert_eq!(app.input_box.buffer.value(), "draft");
+    assert_eq!(app.status_bar.flash_text(), Some("Draft restored"));
+}
+
+#[test]
+fn ctrl_d_flashes_then_exits_on_second_press() {
+    let mut app = test_app();
+    let actions = app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert!(actions.is_empty());
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some("Press Ctrl+D again to exit")
+    );
+    assert_eq!(app.exit_request, ExitRequest::None);
+
+    app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert_eq!(app.exit_request, ExitRequest::Success);
+}
+
+#[test]
+fn ctrl_d_deletes_char_forward_with_text() {
+    let mut app = test_app();
+    for c in "ab".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(key(KeyCode::Home)));
+
+    let actions = app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert!(actions.is_empty());
+    assert_eq!(app.input_box.buffer.value(), "b");
+    assert_eq!(app.exit_request, ExitRequest::None);
+}
+
+#[test]
+fn unbound_ctrl_chords_never_insert_text() {
+    let mut app = test_app();
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('m'),
+        KeyModifiers::CONTROL,
+    )));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    assert_eq!(app.input_box.buffer.value(), "");
+}
+
+#[test]
+fn ctrl_r_history_search_end_to_end() {
+    let mut app = test_app();
+    type_and_submit(&mut app, "first prompt");
+    type_and_submit(&mut app, "second prompt");
+
+    app.update(Msg::Key(kb::HISTORY_SEARCH.to_key_event()));
+    assert!(app.input_box.history_search_active());
+
+    for c in "fir".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert_eq!(app.input_box.buffer.value(), "first prompt");
+
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(!app.input_box.history_search_active());
+    assert_eq!(app.input_box.buffer.value(), "first prompt");
+}
+
+#[test]
+fn ctrl_c_during_history_search_aborts_search_not_app() {
+    let mut app = test_app();
+    for c in "wip".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(kb::HISTORY_SEARCH.to_key_event()));
+    assert!(app.input_box.history_search_active());
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+    assert!(!app.input_box.history_search_active());
+    assert_eq!(app.input_box.buffer.value(), "wip");
+    assert_eq!(app.exit_request, ExitRequest::None);
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelAgent { .. }))
+    );
+}
+
+#[test]
+fn ctrl_c_during_search_while_streaming_keeps_agent() {
+    let mut app = streaming_app_without_queue();
+    app.update(Msg::Key(kb::HISTORY_SEARCH.to_key_event()));
+    assert!(app.input_box.history_search_active());
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+    assert!(!app.input_box.history_search_active());
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, Action::CancelAgent { .. })),
+        "Ctrl+C must abort the search, not the running agent"
+    );
+    assert_eq!(app.status, Status::Streaming);
+}
+
+#[test]
+fn kitty_shifted_codepoint_still_matches_shifted_binds() {
+    // REPORT_ALTERNATE_KEYS folds Shift into the codepoint and clears the
+    // flag: Alt+Shift+G arrives as Char('G')+ALT, Ctrl+Shift+C as
+    // Char('C')+CONTROL. Both must resolve to the shifted binding.
+    let mut app = test_app();
+    app.active_chat().enable_auto_scroll();
+    app.update(Msg::Key(kb::CHAT_SCROLL_TOP.to_key_event()));
+    assert!(!app.chats[0].auto_scroll());
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('G'),
+        KeyModifiers::ALT,
+    )));
+    assert!(
+        app.chats[0].auto_scroll(),
+        "Alt+Shift+G (folded) should jump to bottom"
+    );
+
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('C'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(app.input_box.buffer.value(), "hi");
+    assert_eq!(app.exit_request, ExitRequest::None);
+}
+
+#[test]
+fn super_enter_submits_like_plain_enter() {
+    let mut app = test_app();
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER)));
+    assert_eq!(
+        app.input_box.buffer.value(),
+        "",
+        "Super+Enter should submit"
+    );
+}
+
+#[test]
+fn ctrl_d_arm_resets_when_typing_between_presses() {
+    let mut app = test_app();
+    app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some("Press Ctrl+D again to exit")
+    );
+    // Intervening real input must disarm the double-press window.
     app.update(Msg::Key(key(KeyCode::Char('x'))));
-    app.update(Msg::Key(kb::FILE_PICKER.to_key_event()));
-    assert!(app.file_picker.is_open());
-    assert_eq!(app.input_box.buffer.value(), "x");
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.update(Msg::Key(kb::DELETE.to_key_event()));
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::None,
+        "intervening typing must reset the Ctrl+D exit arm"
+    );
+}
+
+#[test]
+fn ctrl_underscore_undoes_composer_edit() {
+    let mut app = test_app();
+    for c in "hi".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('_'),
+        KeyModifiers::CONTROL,
+    )));
+    assert_eq!(app.input_box.buffer.value(), "");
+}
+
+#[test]
+fn shift_enter_inserts_newline() {
+    let mut app = test_app();
+    for c in "ab".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
+    assert_eq!(app.input_box.buffer.value(), "ab\n");
 }
 
 #[test]
@@ -1787,9 +1976,9 @@ fn scroll_outside_msg_area_ignored() {
 fn scroll_shortcuts_toggle_auto_scroll() {
     let mut app = test_app();
     app.active_chat().enable_auto_scroll();
-    app.update(Msg::Key(kb::SCROLL_TOP.to_key_event()));
+    app.update(Msg::Key(kb::CHAT_SCROLL_TOP.to_key_event()));
     assert!(!app.chats[0].auto_scroll());
-    app.update(Msg::Key(kb::SCROLL_BOTTOM.to_key_event()));
+    app.update(Msg::Key(kb::CHAT_SCROLL_BOTTOM.to_key_event()));
     assert!(app.chats[0].auto_scroll());
 }
 
@@ -1874,7 +2063,7 @@ fn mouse_up_clears_edge_scroll() {
 }
 
 #[test]
-fn double_esc_cancels_flushes_and_fails_tools() {
+fn esc_cancels_flushes_and_fails_tools() {
     let mut app = test_app();
     app.status = Status::Streaming;
     app.run_id = 1;
@@ -1895,10 +2084,6 @@ fn double_esc_cancels_flushes_and_fails_tools() {
     }
     render_chat(&mut app, 0, Rect::new(0, 0, 80, 20));
 
-    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(actions.is_empty());
-
-    app.last_esc = Some(Instant::now());
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(matches!(&actions[0], Action::CancelAgent { .. }));
     assert_eq!(app.status, Status::Idle);
@@ -3657,15 +3842,16 @@ fn expanded_subagent_chat_sends_typed_steering() {
 }
 
 #[test]
-fn typing_steering_clears_pending_subagent_cancel() {
+fn esc_in_subagent_cancels_then_returns_to_main() {
     let (mut app, _prompt_rx) = app_with_steerable_subagent("child-a");
-    app.update(Msg::Key(key(KeyCode::Esc)));
-    app.update(Msg::Key(key(KeyCode::Char('e'))));
 
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(matches!(&actions[..], [Action::CancelSubagent { .. }]));
+    assert!(app.chats[1].is_finished());
 
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(actions.is_empty());
-    assert!(!app.chats[1].is_finished());
+    assert_eq!(app.active_chat, 0);
 }
 
 #[test]
@@ -3885,10 +4071,19 @@ fn open_editor(plan: PlanState, expect_flash: bool) {
 }
 
 #[test]
-fn alt_o_opens_editor_for_input() {
+fn edit_input_opens_editor_for_input() {
     let mut app = test_app();
     app.input_box.buffer.insert_text("hello");
     let actions = app.update(Msg::Key(kb::EDIT_INPUT.to_key_event()));
+    assert!(matches!(&actions[..], [Action::EditInputInEditor]));
+}
+
+#[test]
+fn alt_o_alias_opens_editor_for_input() {
+    let mut app = test_app();
+    app.input_box.buffer.insert_text("hello");
+    let alt_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT);
+    let actions = app.update(Msg::Key(alt_o));
     assert!(matches!(&actions[..], [Action::EditInputInEditor]));
 }
 
@@ -4219,7 +4414,7 @@ fn rewrite_does_not_reopen_after_dismiss() {
 }
 
 #[test]
-fn ctrl_t_toggles_plan_form_in_plan_mode() {
+fn plan_toggle_toggles_plan_form_in_plan_mode() {
     let mut app = plan_app();
     assert!(app.plan_form.is_visible());
 
@@ -4231,7 +4426,7 @@ fn ctrl_t_toggles_plan_form_in_plan_mode() {
 }
 
 #[test]
-fn ctrl_t_noop_when_plan_not_ready() {
+fn plan_toggle_noop_when_plan_not_ready() {
     let mut app = test_app();
     app.state.mode = Mode::Plan;
     app.state.plan = PlanState::Drafting(PathBuf::from("test-plan.md"));
@@ -4288,6 +4483,48 @@ fn override_shadows_quit_builtin() {
         app.exit_request,
         ExitRequest::None,
         "override must consume Ctrl+C before the built-in quit handler runs"
+    );
+}
+
+#[test]
+fn override_matches_shifted_key_in_both_terminal_shapes() {
+    // Lua spells shift two ways: `<C-T>` stores Char('T')+CONTROL (shift in
+    // the codepoint), `<C-S-t>` stores Char('t')+CONTROL|SHIFT. Kitty
+    // REPORT_ALTERNATE_KEYS also delivers the folded shape, so dispatch
+    // must normalize both sides or shifted Lua binds go dead there.
+    let entry = n00n_lua::KeymapEntry {
+        key: KeyCode::Char('T'),
+        modifiers: KeyModifiers::CONTROL,
+        desc: "plugin shifted override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 7,
+    };
+    let reader = n00n_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    let (handle, probe) = n00n_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.keymap_reader = reader;
+
+    // Folded shape: shifted codepoint, SHIFT flag cleared.
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('T'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(actions.is_empty());
+    assert!(
+        probe.try_recv().is_some(),
+        "folded <C-T> event must reach the Lua keybind callback"
+    );
+
+    // Flagged shape: lowercase + explicit SHIFT, same binding.
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )));
+    assert!(actions.is_empty());
+    assert!(
+        probe.try_recv().is_some(),
+        "flagged Ctrl+Shift+T event must reach the Lua keybind callback"
     );
 }
 
@@ -4997,9 +5234,8 @@ fn app_with_active_subagent() -> App {
 }
 
 #[test]
-fn double_esc_in_subagent_cancels_subagent() {
+fn esc_in_subagent_cancels_subagent() {
     let mut app = app_with_active_subagent();
-    app.last_esc = Some(Instant::now());
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert_eq!(actions.len(), 1);
     assert!(matches!(
@@ -5011,23 +5247,9 @@ fn double_esc_in_subagent_cancels_subagent() {
 }
 
 #[test]
-fn single_or_stale_esc_in_subagent_flashes() {
-    let mut app = app_with_active_subagent();
-    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(actions.is_empty());
-    assert_eq!(app.status_bar.flash_text().unwrap(), FLASH_CANCEL);
-
-    app.last_esc = Some(Instant::now().checked_sub(Duration::from_secs(10)).unwrap());
-    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
-    assert!(actions.is_empty());
-    assert!(!app.chats[1].is_finished());
-}
-
-#[test]
 fn esc_in_main_chat_with_active_subagent_no_cancel() {
     let mut app = app_with_subagent();
     assert_eq!(app.active_chat, 0);
-    app.last_esc = Some(Instant::now());
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert_eq!(actions.len(), 1);
     assert!(matches!(&actions[0], Action::CancelAgent { .. }));
@@ -5040,7 +5262,6 @@ fn cancel_subagent_removes_answer_sender() {
     assert!(!app.subagent_answers.is_empty());
     app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
     assert_eq!(app.active_chat, 1);
-    app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(!app.subagent_answers.contains_key("task1"));
 }
@@ -5055,7 +5276,6 @@ fn multiple_subagents_cancel_one_other_unaffected() {
     assert_eq!(app.chats.len(), 3);
 
     app.active_chat = app.chat_index["task2"];
-    app.last_esc = Some(Instant::now());
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
 
     assert_eq!(actions.len(), 1);
@@ -5069,18 +5289,17 @@ fn multiple_subagents_cancel_one_other_unaffected() {
 }
 
 #[test]
-fn double_esc_in_finished_subagent_noop() {
+fn esc_in_finished_subagent_returns_to_main() {
     let mut app = app_with_active_subagent();
     finish_subagent_task(&mut app, false);
-    app.last_esc = Some(Instant::now());
     let actions = app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(actions.is_empty());
+    assert_eq!(app.active_chat, 0);
 }
 
 #[test]
 fn subagent_cancel_then_navigate_back_main_unaffected() {
     let mut app = app_with_active_subagent();
-    app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(app.chats[1].is_finished());
 

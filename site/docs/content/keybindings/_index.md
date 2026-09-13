@@ -13,52 +13,58 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+C` | Quit / clear input |
+| `Ctrl+C` | Interrupt / clear / quit |
 | `Ctrl+H` | Show keybindings |
+| `Ctrl+L` | Redraw screen |
 | `Ctrl+N` / `Ctrl+P` | Next / previous task chat |
+| `PageUp` / `PageDown` | Scroll page up / down |
+| `Alt+U` / `Alt+D` | Scroll half page up / down |
+| `Alt+G` / `Alt+Shift+G` | Scroll to top / bottom |
 | `Ctrl+F` | Search messages |
-| `Ctrl+S` | File picker |
-| `Ctrl+O` | Open plan in editor |
-| `Ctrl+T` | Toggle plan panel |
-| `Alt+I` | Toggle transcript details |
-| `Ctrl+X` | Open tasks |
-| `Ctrl+Shift+C` | Copy selection |
+| `Ctrl+O` | Toggle transcript details |
+| `Ctrl+T` | Open tasks |
+| `Alt+P` | Toggle plan panel |
+| `Alt+Shift+P` | Open plan in editor |
+| `Ctrl+G` | Edit input in external editor |
 | `Alt+T` / `Ctrl+Shift+T` | Cycle thinking level |
+| `Ctrl+Shift+C` | Copy selection |
+| `Ctrl+V` | Paste image from clipboard |
+| `Ctrl+Q` | Pop queue |
 
 ## Editing
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Submit prompt |
-| `\+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
-| `Tab` | Toggle mode |
+| `Shift+Enter` / `\+Enter` / `Ctrl+J` | Newline |
+| `Tab` | Toggle mode / queue message |
+| `Esc Esc` | Clear draft / rewind |
+| `↑` / `↓` | History / cursor |
+| `Home` / `End` | Start / end of line |
+| `Del` | Delete char forward |
+| `Ctrl+A` | Jump to start of line |
+| `Ctrl+E` | Jump to end of line |
+| `Ctrl+W / Ctrl+Bksp` | Delete word backward |
+| `Ctrl+Del` / `Alt+D` | Delete word forward |
+| `Ctrl+←` / `Ctrl+→` | Move word left / right |
+| `Alt+←` / `Alt+→` | Move word left / right |
+| `Ctrl+K` | Delete to end of line |
+| `Ctrl+U` | Delete to start of line |
+| `Ctrl+Y` | Paste deleted text |
+| `Alt+Y` | Cycle paste history |
+| `Ctrl+_` / `Ctrl+-` | Undo last edit |
+| `Ctrl+Shift+Z` | Redo edit |
+| `Ctrl+S` | Stash / restore draft |
+| `Ctrl+R` | Search input history |
+| `Ctrl+D` | Delete char / exit |
 | `/command` | Open command palette |
 | `@` | Mention a file (Esc leaves a literal @) |
-| `Ctrl+W` | Delete word backward |
-| `Alt+←` / `Alt+→` | Move word left / right |
-| `Ctrl+A` | Jump to start of line |
-| `Home` / `End` | Jump to start/end of line |
-| `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
-| `Ctrl+E` | Jump to end of line |
-| `Ctrl+G` | Scroll to top |
-| `Ctrl+B` | Scroll to bottom and resume auto-scroll |
-| `Ctrl+Q` | Pop queue |
-| `Esc Esc` | Rewind |
-| `Alt+O` | Edit input in external editor |
-
-### macOS-specific
-
-| Key | Action |
-|-----|--------|
-| `Ctrl+Del` / `⌥Del` | Delete word forward |
-| `Ctrl+K` | Delete to end of line |
 
 ## While Streaming
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Navigate input history |
-| `Esc Esc` | Cancel agent |
+| `Esc` | Interrupt agent |
 
 ## Form
 
@@ -85,6 +91,12 @@ Some pickers add extra bindings on top of the defaults:
 
 | Context | Key | Action |
 |---------|-----|--------|
+| Subagent Chat | `←` | Back to main chat |
+| Subagent Chat | `Esc` | Back / cancel subagent |
+| History Search | `Enter` / `Tab` | Accept match |
+| History Search | `Esc` | Cancel search |
+| History Search | `↑` / `Ctrl+R` | Older match |
+| History Search | `↓` | Newer match |
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |
 | Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
@@ -97,6 +109,7 @@ Some pickers add extra bindings on top of the defaults:
 
 Child contexts inherit their parent's bindings and add their own.
 
+- **Editing** is the base for: Subagent Chat, History Search
 - **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
 
 ## Overriding Keybindings

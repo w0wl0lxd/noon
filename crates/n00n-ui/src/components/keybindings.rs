@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write;
+use std::sync::LazyLock;
 use strum::EnumIter;
 use unicode_width::UnicodeWidthStr;
 
@@ -108,9 +109,13 @@ pub struct Bind {
 }
 
 impl Bind {
+    /// Match both sides through stroke normalization so shifted chords
+    /// compare identically whether the terminal keeps the SHIFT flag or
+    /// folds it into the codepoint (Kitty `REPORT_ALTERNATE_KEYS`).
     #[must_use]
     pub fn matches(&self, key: KeyEvent) -> bool {
-        key.code == self.code && key.modifiers == self.modifiers
+        use crate::keymap::KeyStroke;
+        KeyStroke::normalize(key) == KeyStroke::normalize_parts(self.code, self.modifiers)
     }
 
     #[cfg(test)]
@@ -139,29 +144,55 @@ pub mod key {
     pub const SCROLL_LINE_DOWN: Bind = ctrl_bind!('e');
     pub const SCROLL_TOP: Bind = ctrl_bind!('g');
     pub const SCROLL_BOTTOM: Bind = ctrl_bind!('b');
+    pub const CHAT_SCROLL_HALF_UP: Bind = Bind {
+        code: KeyCode::Char('u'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+U",
+    };
+    pub const CHAT_SCROLL_HALF_DOWN: Bind = Bind {
+        code: KeyCode::Char('d'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+D",
+    };
+    pub const CHAT_SCROLL_TOP: Bind = Bind {
+        code: KeyCode::Char('g'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+G",
+    };
+    pub const CHAT_SCROLL_BOTTOM: Bind = Bind {
+        code: KeyCode::Char('g'),
+        modifiers: KeyModifiers::from_bits_truncate(
+            KeyModifiers::ALT.bits() | KeyModifiers::SHIFT.bits(),
+        ),
+        label: "Alt+Shift+G",
+    };
     pub const POP_QUEUE: Bind = ctrl_bind!('q');
     pub const DELETE_WORD: Bind = ctrl_bind!('w');
     pub const SEARCH: Bind = ctrl_bind!('f');
-    pub const FILE_PICKER: Bind = ctrl_bind!('s');
-    pub const OPEN_EDITOR: Bind = ctrl_bind!('o');
-    pub const PLAN_TOGGLE: Bind = ctrl_bind!('t');
-    pub const TRANSCRIPT_DETAILS: Bind = Bind {
-        code: KeyCode::Char('i'),
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+I",
+    pub const STASH: Bind = ctrl_bind!('s');
+    pub const OPEN_EDITOR: Bind = Bind {
+        code: KeyCode::Char('p'),
+        modifiers: KeyModifiers::from_bits_truncate(
+            KeyModifiers::ALT.bits() | KeyModifiers::SHIFT.bits(),
+        ),
+        label: "Alt+Shift+P",
     };
-    pub const TASKS: Bind = ctrl_bind!('x');
+    pub const PLAN_TOGGLE: Bind = Bind {
+        code: KeyCode::Char('p'),
+        modifiers: KeyModifiers::ALT,
+        label: "Alt+P",
+    };
+    pub const TRANSCRIPT_DETAILS: Bind = ctrl_bind!('o');
+    pub const TASKS: Bind = ctrl_bind!('t');
     pub const REFRESH: Bind = ctrl_bind!('r');
+    pub const HISTORY_SEARCH: Bind = ctrl_bind!('r');
+    pub const REDRAW: Bind = ctrl_bind!('l');
     pub const SUSPEND: Bind = ctrl_bind!('z');
     pub const DELETE: Bind = ctrl_bind!('d');
     pub const KILL_LINE: Bind = ctrl_bind!('k');
     pub const LINE_START: Bind = ctrl_bind!('a');
     pub const LINE_END: Bind = ctrl_bind!('e');
-    pub const EDIT_INPUT: Bind = Bind {
-        code: KeyCode::Char('o'),
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+O",
-    };
+    pub const EDIT_INPUT: Bind = ctrl_bind!('g');
     pub const COPY: Bind = Bind {
         code: KeyCode::Char('c'),
         modifiers: KeyModifiers::from_bits_truncate(
@@ -188,6 +219,8 @@ pub enum KeybindContext {
     General,
     Editing,
     Streaming,
+    SubagentChat,
+    HistorySearch,
     Picker,
     FormInput,
     TaskPicker,
@@ -207,6 +240,8 @@ impl KeybindContext {
             Self::General => "General",
             Self::Editing => "Editing",
             Self::Streaming => "While Streaming",
+            Self::SubagentChat => "Subagent Chat",
+            Self::HistorySearch => "History Search",
             Self::Picker => "Pickers",
             Self::FormInput => "Form",
             Self::TaskPicker => "Task Picker",
@@ -231,6 +266,7 @@ impl KeybindContext {
             | Self::CommandPalette
             | Self::Search
             | Self::FilePicker => Some(Self::Picker),
+            Self::SubagentChat | Self::HistorySearch => Some(Self::Editing),
             _ => None,
         }
     }
@@ -326,6 +362,7 @@ impl KeyLabel {
     }
 }
 
+#[derive(Clone)]
 pub struct Keybind {
     pub label: KeyLabel,
     pub description: &'static str,
@@ -333,100 +370,9 @@ pub struct Keybind {
     pub platform: Platform,
 }
 
-pub const KEYBINDS: &[Keybind] = &[
-    Keybind {
-        label: KeyLabel::Single(key::QUIT.label),
-        description: "Quit / clear input",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::HELP.label),
-        description: "Show keybindings",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
-        description: "Next / previous task chat",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SEARCH.label),
-        description: "Search messages",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::FILE_PICKER.label),
-        description: "File picker",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::OPEN_EDITOR.label),
-        description: "Open plan in editor",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::PLAN_TOGGLE.label),
-        description: "Toggle plan panel",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::TRANSCRIPT_DETAILS.label),
-        description: "Toggle transcript details",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::TASKS.label),
-        description: "Open tasks",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::COPY.label),
-        description: "Copy selection",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacMulti(
-            &[key::THINKING_ALT.label, key::THINKING.label],
-            &["⌥T", "⌃⇧T"],
-        ),
-        description: "Cycle thinking level",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SUSPEND.label),
-        description: "Suspend process",
-        context: KeybindContext::General,
-        platform: Platform::UnixOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single("Enter"),
-        description: "Submit prompt",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacMulti(&["\\+Enter", "Ctrl+J", "Alt+Enter"], &["⇧↵", "⌃J", "⌥↵"]),
-        description: "Newline",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Tab"),
-        description: "Toggle mode",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
+/// Help entries for surfaces whose keys are component-owned (pickers,
+/// modals, prefix triggers) rather than resolved through `keymap::BINDINGS`.
+const MODAL_KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::Single("/command"),
         description: "Open command palette",
@@ -437,96 +383,6 @@ pub const KEYBINDS: &[Keybind] = &[
         label: KeyLabel::Single("@"),
         description: "Mention a file (Esc leaves a literal @)",
         context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),
-        description: "Delete word backward",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacMulti(&["Alt+←", "Alt+→"], &["⌥←", "⌥→"]),
-        description: "Move word left / right",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(mod_key!("Del"), "⌥Del"),
-        description: "Delete word forward",
-        context: KeybindContext::Editing,
-        platform: Platform::MacOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::KILL_LINE.label),
-        description: "Delete to end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::MacOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::LINE_START.label),
-        description: "Jump to start of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("Home", "End"),
-        description: "Jump to start/end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-        description: "Scroll half page up / down",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::LINE_END.label),
-        description: "Jump to end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SCROLL_TOP.label),
-        description: "Scroll to top",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
-        description: "Scroll to bottom and resume auto-scroll",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::POP_QUEUE.label),
-        description: "Pop queue",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc Esc"),
-        description: "Rewind",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::EDIT_INPUT.label),
-        description: "Edit input in external editor",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
-        description: "Navigate input history",
-        context: KeybindContext::Streaming,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc Esc"),
-        description: "Cancel agent",
-        context: KeybindContext::Streaming,
         platform: Platform::All,
     },
     Keybind {
@@ -609,6 +465,26 @@ pub const KEYBINDS: &[Keybind] = &[
     },
 ];
 
+/// Help-visible keybinds: the chat layer generates from `keymap::BINDINGS`
+/// so the help modal can never drift from what dispatch actually does, plus
+/// the component-owned modal entries above.
+pub static KEYBINDS: LazyLock<Vec<Keybind>> = LazyLock::new(|| {
+    let mut list: Vec<Keybind> = crate::keymap::BINDINGS
+        .iter()
+        .flat_map(|(context, bindings)| bindings.iter().map(move |b| (*context, b)))
+        .filter_map(|(context, binding)| {
+            binding.label.map(|label| Keybind {
+                label,
+                description: binding.description,
+                context,
+                platform: binding.platform,
+            })
+        })
+        .collect();
+    list.extend_from_slice(MODAL_KEYBINDS);
+    list
+});
+
 pub fn all_contexts() -> impl Iterator<Item = KeybindContext> {
     use strum::IntoEnumIterator;
     KeybindContext::iter()
@@ -677,13 +553,13 @@ mod tests {
 
     #[test]
     fn bind_requires_exact_modifiers() {
-        let bind = key::OPEN_EDITOR; // Ctrl+O
-        let exact = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let bind = key::EDIT_INPUT; // Ctrl+G
+        let exact = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
         let extra = KeyEvent::new(
-            KeyCode::Char('o'),
+            KeyCode::Char('g'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
-        let wrong = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT);
+        let wrong = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT);
 
         assert!(bind.matches(exact));
         assert!(!bind.matches(extra), "extra modifiers should not match");
