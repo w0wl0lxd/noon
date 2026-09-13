@@ -343,6 +343,12 @@ fn cap_after_instructions(content: String) -> String {
         {
             out.truncate(nl);
         }
+        if out.len() > MAX_AFTER_INSTRUCTIONS_BYTES {
+            // Only the header region remains (other plugins' hint text sits
+            // before the first JSON line). It is prose, not a todo payload,
+            // so a hard char-boundary cut is safe and keeps the cap absolute.
+            out.truncate(out.floor_char_boundary(MAX_AFTER_INSTRUCTIONS_BYTES));
+        }
     }
     warn!(
         tool = "AfterInstructions",
@@ -372,11 +378,20 @@ fn shrink_todo_line(line: &str, avail: usize) -> Option<String> {
         // JSON escaping makes the re-encoded line longer than the decoded
         // content suggests, so size against the serialized form. Encoded
         // length is monotonic in the decoded prefix, hence binary search.
+        // Search over char-boundary indices: lo/hi are positions in
+        // `boundaries`, so each step strictly shrinks the range and the loop
+        // cannot stall inside a multi-byte character.
+        let boundaries: Vec<usize> = original
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .chain(std::iter::once(original.len()))
+            .collect();
         let mut lo = 0usize;
-        let mut hi = original.len();
+        let mut hi = boundaries.len() - 1;
         let mut best = None;
         while lo <= hi {
-            let mid = original.floor_char_boundary(lo.midpoint(hi));
+            let idx = lo.midpoint(hi);
+            let mid = boundaries[idx];
             if let Some(slot) = val.get_mut("content") {
                 *slot = serde_json::Value::String(format!("{}...", &original[..mid]));
             }
@@ -386,11 +401,11 @@ fn shrink_todo_line(line: &str, avail: usize) -> Option<String> {
             };
             if candidate.len() <= avail {
                 best = Some(candidate);
-                lo = mid.saturating_add(1);
-            } else if mid == 0 {
+                lo = idx + 1;
+            } else if idx == 0 {
                 break;
             } else {
-                hi = mid.saturating_sub(1);
+                hi = idx - 1;
             }
         }
         return best;
@@ -896,6 +911,60 @@ mod tests {
                 panic!("malformed todo line: {}", &line[..line.len().min(120)])
             });
         }
+    }
+
+    #[test]
+    fn todo_cap_multibyte_content_shrinks_without_stall() {
+        // Multi-byte chars made the old byte-index binary search converge onto
+        // a char interior and loop forever. Any non-ASCII todo large enough to
+        // need shrinking must still terminate and emit valid JSON.
+        let multibyte = "é".repeat(MAX_AFTER_INSTRUCTIONS_BYTES);
+        let content = format!("# Current todos\n{}", todo_line("in_progress", &multibyte));
+        let out = cap_after_instructions(content);
+        assert!(
+            out.len() <= MAX_AFTER_INSTRUCTIONS_BYTES,
+            "len={}",
+            out.len()
+        );
+        for line in out.lines().filter(|l| l.trim_start().starts_with('{')) {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|_| {
+                panic!("malformed todo line: {}", &line[..line.len().min(120)])
+            });
+        }
+    }
+
+    #[test]
+    fn todo_cap_multibyte_four_byte_char_shrinks() {
+        let multibyte = "🙂".repeat(MAX_AFTER_INSTRUCTIONS_BYTES);
+        let content = format!("# Current todos\n{}", todo_line("in_progress", &multibyte));
+        let out = cap_after_instructions(content);
+        assert!(
+            out.len() <= MAX_AFTER_INSTRUCTIONS_BYTES,
+            "len={}",
+            out.len()
+        );
+        for line in out.lines().filter(|l| l.trim_start().starts_with('{')) {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|_| {
+                panic!("malformed todo line: {}", &line[..line.len().min(120)])
+            });
+        }
+    }
+
+    #[test]
+    fn todo_cap_oversized_header_still_bounded() {
+        // Hint text before the first JSON line is preserved, but it cannot be
+        // allowed to push the whole block past the cap.
+        let header = "m".repeat(MAX_AFTER_INSTRUCTIONS_BYTES + 512);
+        let content = format!(
+            "{header}\n# Current todos\n{}",
+            todo_line("in_progress", "task")
+        );
+        let out = cap_after_instructions(content);
+        assert!(
+            out.len() <= MAX_AFTER_INSTRUCTIONS_BYTES,
+            "len={}",
+            out.len()
+        );
     }
 
     #[test]

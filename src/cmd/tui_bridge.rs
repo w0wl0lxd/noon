@@ -16,7 +16,12 @@ use n00n_storage::id::SessionRef;
 use serde_json::Value;
 
 const SESSION_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Reads `session_roundtrip_timeout` from config or `N00N_SESSION_ROUNDTRIP_TIMEOUT_SECS` env var.
+/// Extra wait after the roundtrip timeout for a slow-but-alive UI to reply.
+/// Bounds total wait at `timeout + REPLY_GRACE` rather than doubling it.
+const REPLY_GRACE: Duration = Duration::from_secs(1);
+/// Reads `N00N_SESSION_ROUNDTRIP_TIMEOUT_SECS` for the test-only convenience
+/// wrappers below; the live TUI path uses `agent.session_roundtrip_timeout_secs`
+/// from config instead (see `try_spawn_with_timeout`).
 #[must_use]
 pub fn default_session_roundtrip_timeout() -> Duration {
     match std::env::var("N00N_SESSION_ROUNDTRIP_TIMEOUT_SECS") {
@@ -330,8 +335,11 @@ fn session_call_with_timeout(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(e)) => Err(ControlError::Unavailable(e)),
         Err(flume::RecvTimeoutError::Timeout) => {
-            tracing::warn!(timeout_ms, "tui session reply timed out, retrying once");
-            match reply_rx.recv_timeout(timeout) {
+            tracing::warn!(
+                timeout_ms,
+                "tui session reply timed out, waiting a short grace period"
+            );
+            match reply_rx.recv_timeout(REPLY_GRACE) {
                 Ok(Ok(value)) => Ok(value),
                 Ok(Err(e)) => Err(ControlError::Unavailable(e)),
                 Err(flume::RecvTimeoutError::Timeout) => {

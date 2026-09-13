@@ -682,7 +682,7 @@ impl ToolOutput {
                 }
                 let max_line_bytes = max_bytes.clamp(1, 4096);
                 for line in &mut lines {
-                    *line = crate::tools::truncate_output(line, 1, max_line_bytes);
+                    *line = crate::tools::truncate_output_quiet(line, 1, max_line_bytes);
                 }
                 Self::ReadCode {
                     path,
@@ -720,7 +720,7 @@ impl ToolOutput {
                     );
                 }
                 for item in &mut items {
-                    item.content = crate::tools::truncate_output(&item.content, 1, max_bytes);
+                    item.content = crate::tools::truncate_output_quiet(&item.content, 1, max_bytes);
                 }
                 Self::TodoList(items)
             }
@@ -743,7 +743,7 @@ impl ToolOutput {
                     );
                 }
                 for line in &mut lines {
-                    *line = crate::tools::truncate_output(line, 1, max_bytes);
+                    *line = crate::tools::truncate_output_quiet(line, 1, max_bytes);
                 }
                 Self::WriteCode {
                     path,
@@ -769,7 +769,8 @@ impl ToolOutput {
                 telemetry,
             },
         };
-        let truncated_bytes = bounded.as_text().len();
+        let text = bounded.as_text();
+        let truncated_bytes = text.len();
         if truncated_bytes != original_bytes {
             warn!(
                 tool = original_tool,
@@ -781,7 +782,6 @@ impl ToolOutput {
                 "truncated tool output"
             );
         }
-        let text = bounded.as_text();
         let limited = crate::tools::truncate_output(&text, max_lines, max_bytes);
         if limited == text {
             bounded

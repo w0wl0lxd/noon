@@ -28,6 +28,23 @@ function TodoPrompt.prompt_todo_line(item)
   return n00n.json.encode({ status = item.status, content = compact_text(item.content) })
 end
 
+-- Largest prefix length n' <= n such that s:sub(1, n') ends on a UTF-8 char
+-- boundary. A byte cut inside a multi-byte char produces invalid UTF-8 that
+-- n00n.json.encode rejects, so the cut must back off to the lead byte.
+local function utf8_prefix_len(s, n)
+  if n >= #s then
+    return #s
+  end
+  while n > 0 do
+    local b = s:byte(n + 1)
+    if not b or b < 0x80 or b >= 0xC0 then
+      break
+    end
+    n = n - 1
+  end
+  return n
+end
+
 local function shrink_line(line, avail)
   if avail < 1 then
     return nil
@@ -37,20 +54,30 @@ local function shrink_line(line, avail)
   end
   local ok, decoded = pcall(n00n.json.decode, line)
   if ok and decoded and type(decoded.content) == "string" then
-    local overhead = #line - #decoded.content
-    local max_content = avail - overhead - 3
-    if max_content < 0 then
-      return nil
+    local content = decoded.content
+    -- JSON escaping can make the re-encoded line longer than the cut suggests;
+    -- re-measure and cut further a few times rather than dropping the entry.
+    local budget = avail - (#line - #content) - 3
+    for _ = 1, 4 do
+      if budget < 0 then
+        return nil
+      end
+      decoded.content = content:sub(1, utf8_prefix_len(content, budget)) .. "..."
+      local encoded = n00n.json.encode(decoded)
+      if type(encoded) ~= "string" then
+        return nil
+      end
+      if #encoded <= avail then
+        return encoded
+      end
+      budget = budget - (#encoded - avail)
     end
-    if #decoded.content > max_content then
-      decoded.content = decoded.content:sub(1, max_content) .. "..."
-    end
-    return n00n.json.encode(decoded)
+    return nil
   end
   if avail < 4 then
     return nil
   end
-  return line:sub(1, avail - 3) .. "..."
+  return line:sub(1, utf8_prefix_len(line, avail - 3)) .. "..."
 end
 
 function TodoPrompt.truncate_entries(raw_entries, budget)

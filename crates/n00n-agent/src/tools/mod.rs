@@ -594,6 +594,17 @@ pub(crate) fn truncate_bytes(line: &str, max_bytes: usize) -> String {
 
 #[must_use]
 pub fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    truncate_output_impl(text, max_lines, max_bytes, true)
+}
+
+/// [`truncate_output`] without the truncation warning. For callers that bound
+/// many small pieces (per line/item) and report the truncation once themselves.
+#[must_use]
+pub fn truncate_output_quiet(text: &str, max_lines: usize, max_bytes: usize) -> String {
+    truncate_output_impl(text, max_lines, max_bytes, false)
+}
+
+fn truncate_output_impl(text: &str, max_lines: usize, max_bytes: usize, emit_warn: bool) -> String {
     const TRUNCATED_MARKER: &str = "[truncated]";
     if max_bytes == 0 || max_lines == 0 {
         return String::new();
@@ -643,15 +654,17 @@ pub fn truncate_output(text: &str, max_lines: usize, max_bytes: usize) -> String
             result.truncate(result.floor_char_boundary(content_limit));
             result.push_str(&suffix);
         }
-        warn!(
-            tool = "truncate_output",
-            path = "",
-            original_bytes = text.len(),
-            truncated_bytes = result.len(),
-            max_bytes,
-            max_lines,
-            "truncated tool output"
-        );
+        if emit_warn {
+            warn!(
+                tool = "truncate_output",
+                path = "",
+                original_bytes = text.len(),
+                truncated_bytes = result.len(),
+                max_bytes,
+                max_lines,
+                "truncated tool output"
+            );
+        }
     }
     result
 }
