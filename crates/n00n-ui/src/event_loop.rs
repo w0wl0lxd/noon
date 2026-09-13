@@ -59,6 +59,7 @@ use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Status, SubmissionDispatch,
 };
 use crate::input::InputReader;
+use crate::keymap::{EffectiveKeymap, file};
 use crate::session_lineage::{LineageError, LineageLimits, LiveSession, SessionLineageGuard};
 
 use crate::color_compat;
@@ -630,6 +631,7 @@ struct SpawnCtx {
     custom_commands: Arc<[CustomCommand]>,
     lua_command_reader: LuaCommandReader,
     keymap_reader: KeymapReader,
+    effective_keymap: Arc<EffectiveKeymap>,
     hint_reader: HintReader,
     lua_event_handle: Option<EventHandle>,
     mcp_handle: Option<McpHandle>,
@@ -767,6 +769,7 @@ impl SpawnCtx {
             mcp_config_errors: handles.mcp_config_errors.clone(),
             lua_command_reader: self.lua_command_reader.clone(),
             keymap_reader: self.keymap_reader.clone(),
+            effective_keymap: Arc::clone(&self.effective_keymap),
             hint_reader: self.hint_reader.clone(),
             storage_writer: Arc::clone(&self.storage_writer),
             ui_config: self.ui_config.clone(),
@@ -1134,6 +1137,15 @@ impl<'t> EventLoop<'t> {
             project_trusted,
         ));
 
+        // User keymap file: loaded once per UI generation, so `/reload`
+        // rebuilds the effective map from disk. Problems degrade to
+        // warnings — never a startup failure.
+        let (effective_keymap, keymap_warnings) = file::load(&n00n_config::global_config_dirs());
+        for warning in &keymap_warnings {
+            warn!("keymap.toml: {warning}");
+        }
+        startup_warnings.extend(keymap_warnings.iter().map(ToString::to_string));
+
         let (provider, provider_warning) =
             startup_provider_with(&mut model, needs_login, |model| {
                 from_model_with_openai_options(model, timeouts, openai_options.clone())
@@ -1246,6 +1258,7 @@ impl<'t> EventLoop<'t> {
             custom_commands: Arc::from(commands),
             lua_command_reader,
             keymap_reader,
+            effective_keymap: Arc::new(effective_keymap),
             hint_reader,
             lua_event_handle,
             mcp_handle,

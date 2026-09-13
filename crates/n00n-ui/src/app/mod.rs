@@ -52,7 +52,7 @@ use crate::components::{
     SubmissionDispatch,
 };
 use crate::image;
-use crate::keymap::{self, KeyAction};
+use crate::keymap::{self, EffectiveKeymap, KeyAction};
 use crate::selection::{SelectionState, SelectionZone, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
@@ -306,6 +306,9 @@ pub struct App {
     pub(crate) lua_event_handle: Option<EventHandle>,
     pub(crate) revision_allocator: Option<Arc<RevisionAllocator>>,
     pub(super) keymap_reader: KeymapReader,
+    /// `keymap::BINDINGS` merged with `keymap.toml`, built once per UI
+    /// generation — `/reload` picks up file edits.
+    pub(super) effective_keymap: Arc<EffectiveKeymap>,
     pub(super) hint_reader: HintReader,
     pub(crate) restore_event_tx: Option<n00n_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
@@ -322,6 +325,7 @@ pub struct AppInit {
     pub mcp_config_errors: McpConfigErrors,
     pub lua_command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
+    pub effective_keymap: Arc<EffectiveKeymap>,
     pub hint_reader: HintReader,
     pub storage_writer: Arc<StorageWriter>,
     pub ui_config: UiConfig,
@@ -344,6 +348,7 @@ impl App {
             mcp_config_errors,
             lua_command_reader,
             keymap_reader,
+            effective_keymap,
             hint_reader,
             storage_writer,
             ui_config,
@@ -433,6 +438,7 @@ impl App {
             lua_event_handle: None,
             revision_allocator: None,
             keymap_reader,
+            effective_keymap,
             hint_reader,
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
@@ -981,13 +987,14 @@ impl App {
             return actions;
         }
 
-        if !(self.status == Status::Streaming && is_streaming_stop_key(key))
+        let stack = self.context_stack();
+        if !(self.status == Status::Streaming && self.is_streaming_stop_key(&stack, key))
             && self.dispatch_override(key)
         {
             return vec![];
         }
 
-        if let Some(action) = keymap::resolve(&self.context_stack(), key) {
+        if let Some(action) = self.effective_keymap.resolve(&stack, key) {
             return self.perform(action, key);
         }
 
@@ -1014,6 +1021,19 @@ impl App {
             _ => {}
         }
         vec![]
+    }
+
+    /// While streaming, keys that still resolve to a quit/cancel action
+    /// bypass Lua plugin binds so a plugin can't eat the interrupt. Bare
+    /// Esc keeps the same privilege regardless of what it resolves to.
+    /// Rebound quit/cancel keys keep this protection — the check reads the
+    /// effective map, not the compiled-in defaults.
+    fn is_streaming_stop_key(&self, stack: &[KeybindContext], key: KeyEvent) -> bool {
+        key.code == KeyCode::Esc
+            || matches!(
+                self.effective_keymap.resolve(stack, key),
+                Some(KeyAction::QuitOrCancel | KeyAction::CancelAgent)
+            )
     }
 
     fn dispatch_override(&self, key: KeyEvent) -> bool {
@@ -2443,10 +2463,6 @@ impl App {
             self.start_from_queue(&msg)
         }
     }
-}
-
-fn is_streaming_stop_key(key: KeyEvent) -> bool {
-    key::QUIT.matches(key) || key.code == KeyCode::Esc
 }
 
 fn sync_search_highlight(modal: &SearchModal, chat: &mut Chat) {

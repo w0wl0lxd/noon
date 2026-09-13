@@ -116,12 +116,26 @@ Child contexts inherit their parent's bindings and add their own.
 
 Plugins and `init.lua` can rebind keys at runtime with `n00n.keymap.set` and `n00n.keymap.del`. The tables above are the built-in defaults. An override on the same key wins, unless a modal or overlay is open (help, plan form, permission prompt).
 
+For permanent rebinding without Lua, write `keymap.toml` in the n00n config dir (next to `init.lua`):
+
+```toml
+[editing]
+newline = ["shift-enter", "ctrl-j"]
+
+[general]
+quit = "ctrl-c"
+tasks = []   # unbind Ctrl+T
+```
+
+Each entry maps an action to a key or list of keys and replaces the action's whole default list; `[]` unbinds it. Writable contexts: `general`, `editing`, `streaming`, `subagent_chat`, `history_search`. Keys use dash notation (`ctrl-x`, `ctrl-alt-x`, `shift-enter`) or vim notation (`<C-x>`), with named keys `enter`, `esc`, `tab`, `backtab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`, `end`, `pageup`, `pagedown`, `f1`-`f12`. `Ctrl+Z` stays reserved. Bad entries warn at startup and on `/reload`, which also picks up edits — they never fail startup.
+
 Precedence, high to low:
 
 1. **Suspend** (`Ctrl+Z`, Unix). Always wins, non-remappable.
 2. **Modal and overlay keys.** An open modal or picker consumes its keys first, so they cannot be shadowed while open.
 3. **Lua overrides** from `n00n.keymap.set`. Last set wins; binding the same key twice warns.
-4. **Built-in defaults.** An override on the same key shadows them; `n00n.keymap.del` lifts the override so the default returns. Suspend is the only binding outside this layer, so every key is remappable except `Ctrl+Z`.
+4. **`keymap.toml`** user bindings.
+5. **Built-in defaults.** A user or Lua binding on the same key shadows them; `n00n.keymap.del` lifts a Lua override so the default returns. Suspend is the only binding outside these layers, so every key is remappable except `Ctrl+Z`.
 
 Only single-key bindings can be overridden. Multi-key combinations and non-key rows (like `Type` to filter) cannot.
 

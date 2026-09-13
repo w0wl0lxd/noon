@@ -162,6 +162,32 @@ fn write_overrides(out: &mut String) {
          built-in defaults. An override on the same key wins, unless a \
          modal or overlay is open (help, plan form, permission prompt).\n\n",
     );
+    out.push_str(
+        "For permanent rebinding without Lua, write `keymap.toml` in the \
+         n00n config dir (next to `init.lua`):\n\n",
+    );
+    out.push_str(
+        "```toml\n\
+         [editing]\n\
+         newline = [\"shift-enter\", \"ctrl-j\"]\n\
+         \n\
+         [general]\n\
+         quit = \"ctrl-c\"\n\
+         tasks = []   # unbind Ctrl+T\n\
+         ```\n\n",
+    );
+    out.push_str(
+        "Each entry maps an action to a key or list of keys and replaces \
+         the action's whole default list; `[]` unbinds it. Writable \
+         contexts: `general`, `editing`, `streaming`, `subagent_chat`, \
+         `history_search`. Keys use dash notation (`ctrl-x`, \
+         `ctrl-alt-x`, `shift-enter`) or vim notation (`<C-x>`), with \
+         named keys `enter`, `esc`, `tab`, `backtab`, `backspace`, \
+         `delete`, `insert`, `space`, arrows, `home`, `end`, `pageup`, \
+         `pagedown`, `f1`-`f12`. `Ctrl+Z` stays reserved. Bad entries warn \
+         at startup and on `/reload`, which also picks up edits — they \
+         never fail startup.\n\n",
+    );
     out.push_str("Precedence, high to low:\n\n");
     out.push_str(
         "1. **Suspend** (`Ctrl+Z`, Unix). Always wins, non-remappable.\n\
@@ -169,10 +195,11 @@ fn write_overrides(out: &mut String) {
          its keys first, so they cannot be shadowed while open.\n\
          3. **Lua overrides** from `n00n.keymap.set`. Last set wins; \
          binding the same key twice warns.\n\
-         4. **Built-in defaults.** An override on the same key shadows \
-         them; `n00n.keymap.del` lifts the override so the default returns. \
-         Suspend is the only binding outside this layer, so every key is \
-         remappable except `Ctrl+Z`.\n\n",
+         4. **`keymap.toml`** user bindings.\n\
+         5. **Built-in defaults.** A user or Lua binding on the same key \
+         shadows them; `n00n.keymap.del` lifts a Lua override so the \
+         default returns. Suspend is the only binding outside these \
+         layers, so every key is remappable except `Ctrl+Z`.\n\n",
     );
     out.push_str(
         "Only single-key bindings can be overridden. Multi-key combinations \
