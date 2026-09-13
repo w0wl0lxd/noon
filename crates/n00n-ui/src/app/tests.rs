@@ -75,6 +75,7 @@ fn build_app_with_session(
         mcp_config_errors: McpConfigErrors::new(PathBuf::new()),
         lua_command_reader: LuaCommandReader::empty(),
         keymap_reader: KeymapReader::empty(),
+        effective_keymap: Arc::new(EffectiveKeymap::default()),
         hint_reader: HintReader::empty(),
         storage_writer: writer,
         ui_config: UiConfig::default(),
@@ -4702,6 +4703,133 @@ fn streaming_cancel_wins_over_esc_override() {
         "built-in cancel must win while streaming even when Esc is overridden"
     );
     assert_eq!(app.status, Status::Idle);
+}
+
+/// Build a test app whose effective keymap merges `keymap.toml` contents
+/// over the compiled-in defaults. Fixtures should be clean: parse and
+/// merge warnings fail the test.
+fn app_with_keymap(source: &str) -> App {
+    let (user, parse_warnings) = crate::keymap::file::parse(source, Path::new("test.toml"));
+    assert!(parse_warnings.is_empty(), "{parse_warnings:?}");
+    let (effective, merge_warnings) = EffectiveKeymap::build(&user);
+    assert!(merge_warnings.is_empty(), "{merge_warnings:?}");
+    let mut app = test_app();
+    app.effective_keymap = Arc::new(effective);
+    app
+}
+
+#[test]
+fn user_keymap_rebound_key_dispatches_action() {
+    let mut app = app_with_keymap("[general]\nhelp = \"f2\"");
+    assert!(!app.help_modal.is_open());
+
+    press(&mut app, KeyCode::F(2), KeyModifiers::NONE);
+
+    assert!(app.help_modal.is_open());
+}
+
+#[test]
+fn user_keymap_replaced_key_no_longer_dispatches() {
+    let mut app = app_with_keymap("[general]\nhelp = \"f2\"");
+
+    press(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+
+    assert!(
+        !app.help_modal.is_open(),
+        "ctrl-h must be dead once help is rebound to f2"
+    );
+}
+
+#[test]
+fn user_keymap_empty_list_unbinds() {
+    let mut app = app_with_keymap("[general]\ntasks = []");
+
+    press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+    assert!(
+        !app.task_picker.is_open(),
+        "ctrl-t must be dead once tasks is unbound"
+    );
+}
+
+#[test]
+fn lua_override_still_shadows_user_keymap() {
+    let mut app = app_with_keymap("[general]\nhelp = \"f2\"");
+    let entry = n00n_lua::KeymapEntry {
+        key: KeyCode::F(2),
+        modifiers: KeyModifiers::NONE,
+        desc: "plugin f2 override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 10,
+    };
+    app.keymap_reader = n00n_lua::test_support::keymap_reader_with(vec![entry]);
+    let (handle, _probe) = n00n_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+
+    let actions = app.update(Msg::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
+
+    assert!(actions.is_empty());
+    assert!(
+        !app.help_modal.is_open(),
+        "a Lua bind must shadow the user keymap, not just the defaults"
+    );
+}
+
+#[test]
+fn streaming_stop_key_follows_user_rebind() {
+    // `quit` moved to ctrl-x: during streaming the new key keeps the
+    // bypass-Lua privilege that protects the interrupt, and a Lua bind on
+    // it must not swallow the cancel.
+    let mut app = app_with_keymap("[general]\nquit = \"ctrl-x\"");
+    let entry = n00n_lua::KeymapEntry {
+        key: KeyCode::Char('x'),
+        modifiers: KeyModifiers::CONTROL,
+        desc: "plugin ctrl-x override".into(),
+        plugin: std::sync::Arc::from("test-plugin"),
+        id: 11,
+    };
+    app.keymap_reader = n00n_lua::test_support::keymap_reader_with(vec![entry]);
+    let (handle, _probe) = n00n_lua::test_support::probed_event_handle();
+    app.lua_event_handle = Some(handle);
+    app.status = Status::Streaming;
+    app.run_id = 1;
+
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(
+        matches!(&actions[0], Action::CancelAgent { .. }),
+        "a rebound quit key must still cancel the stream over a Lua bind"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn suspend_stays_reserved_with_user_keymap() {
+    // `suspend` and `ctrl-z` are rejected at parse time, so the file can
+    // never shadow the suspend check in handle_key.
+    let (user, warnings) = crate::keymap::file::parse(
+        "[general]\nsuspend = \"ctrl-x\"\nquit = \"ctrl-z\"",
+        Path::new("test.toml"),
+    );
+    assert_eq!(warnings.len(), 2);
+    let (effective, _) = EffectiveKeymap::build(&user);
+    let mut app = test_app();
+    app.effective_keymap = Arc::new(effective);
+
+    let actions = press(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    assert!(
+        actions.is_empty(),
+        "suspend was rejected, ctrl-x is unbound"
+    );
+
+    let actions = press(&mut app, kb::SUSPEND.code, kb::SUSPEND.modifiers);
+    assert!(
+        actions.iter().any(|a| matches!(a, Action::Suspend)),
+        "ctrl-z must still suspend"
+    );
 }
 
 #[test]

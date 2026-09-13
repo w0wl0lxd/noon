@@ -1,14 +1,20 @@
 //! Context-scoped key resolution for the chat layer.
 //!
-//! Key events normalize into [`KeyStroke`]s, then [`resolve`] walks the
-//! active context stack (most specific first) and returns the bound
-//! [`KeyAction`]. Unbound keys return `None`; the caller decides whether a
-//! raw key may still reach the composer (plain text input only — modified
-//! chords never fall through to the buffer).
+//! Key events normalize into [`KeyStroke`]s, then [`EffectiveKeymap::resolve`]
+//! walks the active context stack (most specific first) and returns the bound
+//! [`KeyAction`]. The effective map is [`BINDINGS`] merged with the user's
+//! `keymap.toml` overrides (see [`file`]). Unbound keys return `None`; the
+//! caller decides whether a raw key may still reach the composer (plain text
+//! input only — modified chords never fall through to the buffer).
+
+use std::fmt;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::components::keybindings::{KeyLabel, KeybindContext, Platform};
+use crate::keymap::file::{KeymapWarning, UserKeymap};
+
+pub mod file;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyStroke {
@@ -47,6 +53,47 @@ impl KeyStroke {
                 }
             }
             _ => Self { code, modifiers },
+        }
+    }
+}
+
+/// Canonical dash notation — the `keymap.toml` spelling. Round-trips with
+/// `file::parse_stroke`: `Char('x')+CONTROL|SHIFT` renders `ctrl-shift-x`.
+impl fmt::Display for KeyStroke {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mods = self.modifiers;
+        if mods.contains(KeyModifiers::CONTROL) {
+            f.write_str("ctrl-")?;
+        }
+        if mods.contains(KeyModifiers::ALT) {
+            f.write_str("alt-")?;
+        }
+        if mods.contains(KeyModifiers::SHIFT) {
+            f.write_str("shift-")?;
+        }
+        if mods.contains(KeyModifiers::SUPER) {
+            f.write_str("super-")?;
+        }
+        match self.code {
+            KeyCode::Char(' ') => f.write_str("space"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("enter"),
+            KeyCode::Esc => f.write_str("esc"),
+            KeyCode::Tab => f.write_str("tab"),
+            KeyCode::BackTab => f.write_str("backtab"),
+            KeyCode::Backspace => f.write_str("backspace"),
+            KeyCode::Delete => f.write_str("delete"),
+            KeyCode::Insert => f.write_str("insert"),
+            KeyCode::Up => f.write_str("up"),
+            KeyCode::Down => f.write_str("down"),
+            KeyCode::Left => f.write_str("left"),
+            KeyCode::Right => f.write_str("right"),
+            KeyCode::Home => f.write_str("home"),
+            KeyCode::End => f.write_str("end"),
+            KeyCode::PageUp => f.write_str("pageup"),
+            KeyCode::PageDown => f.write_str("pagedown"),
+            KeyCode::F(n) => write!(f, "f{n}"),
+            other => write!(f, "{other:?}"),
         }
     }
 }
@@ -112,7 +159,7 @@ macro_rules! modified {
 
 /// Every dispatchable chat-layer action. `perform` in `app` maps these onto
 /// concrete behavior; context decides which binding produced them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum KeyAction {
     // App-wide
     QuitOrCancel,
@@ -682,44 +729,167 @@ pub static BINDINGS: &[(KeybindContext, &[KeyBinding])] = &[
     ),
 ];
 
-/// Resolve a key event against the active context stack. Returns the first
-/// matching binding's action, most specific context first.
-#[must_use]
-pub fn resolve(stack: &[KeybindContext], key: KeyEvent) -> Option<KeyAction> {
-    let stroke = KeyStroke::normalize(key);
-    for ctx in stack {
-        let Some(bindings) = BINDINGS
+/// One stroke→action claim in the effective map. `from_user` marks claims
+/// written by `keymap.toml`; during the merge a user claim may displace a
+/// default claim on the same stroke but never an earlier user claim.
+#[derive(Debug, Clone, Copy)]
+struct EffectiveBinding {
+    stroke: KeyStroke,
+    action: KeyAction,
+    platform: Platform,
+    from_user: bool,
+}
+
+/// `BINDINGS` merged with the user's `keymap.toml` overrides, built once
+/// per UI generation and held by `App`. [`Self::resolve`] walks the
+/// context stack against this map; [`BINDINGS`] stays the compiled-in
+/// default layer and the help/docgen source.
+#[derive(Debug)]
+pub struct EffectiveKeymap {
+    contexts: Vec<(KeybindContext, Vec<EffectiveBinding>)>,
+}
+
+impl EffectiveKeymap {
+    /// Merge `BINDINGS` with `user` overrides. Each entry replaces its
+    /// action's whole key list in that context. Strokes are then claimed
+    /// in file order: a user stroke displaces a default claim (warning)
+    /// but loses to an earlier user claim (warning).
+    #[must_use]
+    pub fn build(user: &UserKeymap) -> (Self, Vec<KeymapWarning>) {
+        let mut contexts: Vec<(KeybindContext, Vec<EffectiveBinding>)> = BINDINGS
             .iter()
-            .find_map(|(c, list)| (*c == *ctx).then_some(*list))
-        else {
-            continue;
-        };
-        if let Some(binding) = bindings
-            .iter()
-            .find(|binding| binding.stroke == stroke && binding.platform.is_visible())
-        {
-            return Some(binding.action);
+            .map(|(ctx, bindings)| {
+                (
+                    *ctx,
+                    bindings
+                        .iter()
+                        .map(|b| EffectiveBinding {
+                            stroke: KeyStroke::normalize_parts(b.stroke.code, b.stroke.modifiers),
+                            action: b.action,
+                            platform: b.platform,
+                            from_user: false,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut warnings = Vec::new();
+        for entry in &user.entries {
+            let Some((_, bindings)) = contexts.iter_mut().find(|(ctx, _)| *ctx == entry.context)
+            else {
+                continue;
+            };
+            bindings.retain(|b| b.action != entry.action);
+            for &stroke in &entry.strokes {
+                match bindings.iter_mut().find(|b| b.stroke == stroke) {
+                    Some(existing) if existing.action == entry.action => {}
+                    Some(existing) if existing.from_user => {
+                        warnings.push(KeymapWarning::Conflict {
+                            context: entry.context.name(),
+                            key: stroke.to_string(),
+                            kept: file::action_name(existing.action),
+                            dropped: file::action_name(entry.action),
+                        });
+                    }
+                    Some(existing) => {
+                        warnings.push(KeymapWarning::Shadowed {
+                            context: entry.context.name(),
+                            key: stroke.to_string(),
+                            previous: file::action_name(existing.action),
+                            action: file::action_name(entry.action),
+                        });
+                        existing.action = entry.action;
+                        existing.platform = Platform::All;
+                        existing.from_user = true;
+                    }
+                    None => bindings.push(EffectiveBinding {
+                        stroke,
+                        action: entry.action,
+                        platform: Platform::All,
+                        from_user: true,
+                    }),
+                }
+            }
         }
+        (Self { contexts }, warnings)
     }
-    // The binding table can't enumerate every Enter modifier combo, and the
-    // pre-keymap composer treated them all: any of Shift/Ctrl/Alt meant
-    // newline, Enter with anything else (e.g. `Super`) still submitted.
-    if key.code == KeyCode::Enter
-        && stack.contains(&KeybindContext::Editing)
-        && !stack.contains(&KeybindContext::HistorySearch)
-    {
-        return Some(
-            if key
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+
+    /// Resolve a key event against the active context stack. Returns the
+    /// first matching binding's action, most specific context first.
+    #[must_use]
+    pub fn resolve(&self, stack: &[KeybindContext], key: KeyEvent) -> Option<KeyAction> {
+        let stroke = KeyStroke::normalize(key);
+        for ctx in stack {
+            let Some((_, bindings)) = self.contexts.iter().find(|(c, _)| c == ctx) else {
+                continue;
+            };
+            if let Some(binding) = bindings
+                .iter()
+                .find(|binding| binding.stroke == stroke && binding.platform.is_visible())
             {
-                KeyAction::Newline
-            } else {
-                KeyAction::Submit
-            },
-        );
+                return Some(binding.action);
+            }
+        }
+        self.enter_fallback(stack, key)
     }
-    None
+
+    /// The binding table can't enumerate every Enter modifier combo, and
+    /// the pre-keymap composer treated them all: any of Shift/Ctrl/Alt
+    /// meant newline, Enter with anything else (e.g. `Super`) submitted.
+    /// The blanket is part of the *default* layer: once `keymap.toml`
+    /// rewrites `submit` or `newline`, the action's claims are all
+    /// `from_user` and the fallback dies — a rebind really hands those
+    /// keys back to the composer instead of silently keeping them.
+    fn enter_fallback(&self, stack: &[KeybindContext], key: KeyEvent) -> Option<KeyAction> {
+        const NEWLINE_MODS: KeyModifiers = KeyModifiers::SHIFT
+            .union(KeyModifiers::CONTROL)
+            .union(KeyModifiers::ALT);
+        if key.code != KeyCode::Enter
+            || !stack.contains(&KeybindContext::Editing)
+            || stack.contains(&KeybindContext::HistorySearch)
+        {
+            return None;
+        }
+        let multiline = key.modifiers.intersects(NEWLINE_MODS);
+        let action = if multiline {
+            KeyAction::Newline
+        } else {
+            KeyAction::Submit
+        };
+        let default_enter_survives = self
+            .contexts
+            .iter()
+            .find(|(ctx, _)| *ctx == KeybindContext::Editing)
+            .is_some_and(|(_, bindings)| {
+                bindings.iter().any(|b| {
+                    b.action == action
+                        && !b.from_user
+                        && b.stroke.code == KeyCode::Enter
+                        && b.platform.is_visible()
+                        && if multiline {
+                            b.stroke.modifiers.intersects(NEWLINE_MODS)
+                        } else {
+                            b.stroke.modifiers == KeyModifiers::NONE
+                        }
+                })
+            });
+        default_enter_survives.then_some(action)
+    }
+}
+
+impl Default for EffectiveKeymap {
+    fn default() -> Self {
+        Self::build(&UserKeymap::default()).0
+    }
+}
+
+/// Resolve against the compiled-in defaults — `BINDINGS` with no user
+/// overrides applied.
+#[cfg(test)]
+fn resolve(stack: &[KeybindContext], key: KeyEvent) -> Option<KeyAction> {
+    static DEFAULT: std::sync::LazyLock<EffectiveKeymap> =
+        std::sync::LazyLock::new(EffectiveKeymap::default);
+    DEFAULT.resolve(stack, key)
 }
 
 /// Keys that may still reach the composer when unbound: printable input and

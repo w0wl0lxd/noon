@@ -234,6 +234,35 @@ pub enum KeybindContext {
 }
 
 impl KeybindContext {
+    /// `keymap.toml` section name — the file-format spelling, distinct
+    /// from the help-facing `label()`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Editing => "editing",
+            Self::Streaming => "streaming",
+            Self::SubagentChat => "subagent_chat",
+            Self::HistorySearch => "history_search",
+            Self::Picker => "picker",
+            Self::FormInput => "form_input",
+            Self::TaskPicker => "task_picker",
+            Self::RewindPicker => "rewind_picker",
+            Self::ThemePicker => "theme_picker",
+            Self::ModelPicker => "model_picker",
+            Self::QueueFocus => "queue_focus",
+            Self::CommandPalette => "command_palette",
+            Self::Search => "search",
+            Self::FilePicker => "file_picker",
+        }
+    }
+
+    /// Inverse of [`Self::name`]; unknown names return `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        all_contexts().find(|ctx| ctx.name() == name)
+    }
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
